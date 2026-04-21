@@ -1,0 +1,3 @@
+WARNING:2026-04-21 20:32:04,996:jax._src.xla_bridge:987: An NVIDIA GPU may be present on this machine, but a CUDA-enabled jaxlib is not installed. Falling back to cpu.
+Max drift diff: 6.94e-18  (expected < 1e-10)
+Note: diffrax module not installed; used manual drift-agreement snippet from TESTING.md §5 Test 4.

@@ -19,6 +19,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+def _sigmoid(x):
+    """Numerically stable sigmoid for numpy arrays."""
+    return np.where(x >= 0,
+                    1.0 / (1.0 + np.exp(-x)),
+                    np.exp(x) / (1.0 + np.exp(x)))
+
+
 # =========================================================================
 # PUBLIC ENTRY POINT
 # =========================================================================
@@ -125,6 +132,36 @@ def _compute_E(trajectory, t_grid, params):
     return np.clip(E, 0.0, 1.0)
 
 
+def _compute_E_dynamics(trajectory, params):
+    """Dynamics-side E(t) — the one actually driving mu(E) inside the SDE.
+
+    Matches _dynamics.entrainment_quality and the inline computation in
+    simulation.drift / drift_jax:
+        amp_quality  = 4*sigma(mu_W_slow)*(1-sigma) * 4*sigma(mu_Z_slow)*(1-sigma)
+        phase_quality = max(cos(2*pi*V_c/24), 0)
+        E = amp_quality * phase_quality
+
+    This is what appears in the bifurcation parameter mu(E) = mu_0 + mu_E * E.
+    It differs from _compute_E (windowed amplitude x phase-correlation from
+    the plot) because the dynamics needs something instantaneous and cheap.
+    """
+    a  = trajectory[:, 2]
+    T  = trajectory[:, 3]
+    Vh = trajectory[:, 5]
+    Vn = trajectory[:, 6]
+    p = params
+
+    mu_W_slow = Vh + Vn - a + p['alpha_T'] * T
+    mu_Z_slow = -Vn + p['beta_Z'] * a
+    sW = 1.0 / (1.0 + np.exp(-mu_W_slow))
+    sZ = 1.0 / (1.0 + np.exp(-mu_Z_slow))
+    amp = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
+
+    V_c_rad = 2.0 * np.pi * p['V_c'] / 24.0
+    phase = max(np.cos(V_c_rad), 0.0)
+    return amp * phase
+
+
 def _safe_corr(x, y):
     """Pearson correlation, returning 0 if either series is constant."""
     sx = x.std()
@@ -191,7 +228,7 @@ def _plot_latent(trajectory, t_grid, params, save_path):
     axes[5].legend(loc='upper right', fontsize=8)
     axes[5].grid(True, alpha=0.3)
 
-    basin = _basin_label(Vh[0], Vn[0])
+    basin = _basin_label(Vh[0], Vn[0], params.get('V_c', 0.0))
     fig.suptitle(
         f"SWAT SDE  —  latent states  "
         f"(V_h={Vh[0]:.2f}, V_n={Vn[0]:.2f}  ->  {basin};  "
@@ -207,10 +244,12 @@ def _plot_latent(trajectory, t_grid, params, save_path):
 # =========================================================================
 
 def _plot_observations(trajectory, t_grid, channel_outputs, params, save_path):
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True,
-                             gridspec_kw={'height_ratios': [3, 1]})
+    """Four-panel observations plot: HR, sleep (3-level), steps, stress."""
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True,
+                             gridspec_kw={'height_ratios': [3, 1, 2, 2]})
     t_days = t_grid / 24.0
 
+    # ── Panel 1: HR ──
     hr_chan = channel_outputs.get('hr', {})
     hr_t_idx = hr_chan.get('t_idx', np.arange(len(t_grid)))
     hr_val = hr_chan.get('hr_value', np.zeros(len(t_grid)))
@@ -224,20 +263,65 @@ def _plot_observations(trajectory, t_grid, channel_outputs, params, save_path):
     axes[0].legend(loc='upper right', fontsize=8)
     axes[0].grid(True, alpha=0.3)
 
+    # ── Panel 2: 3-level sleep ──
     sl_chan = channel_outputs.get('sleep', {})
     sl_t_idx = sl_chan.get('t_idx', np.arange(len(t_grid)))
-    sl_lab = sl_chan.get('sleep_label', np.zeros(len(t_grid), dtype=int))
+    sl_lvl = sl_chan.get('sleep_level', np.zeros(len(t_grid), dtype=int))
     t_days_s = t_grid[sl_t_idx] / 24.0
-    axes[1].fill_between(t_days_s, 0, sl_lab, step='mid',
-                         color='midnightblue', alpha=0.7, label='asleep = 1')
-    axes[1].set_yticks([0, 1])
-    axes[1].set_yticklabels(['wake', 'sleep'])
-    axes[1].set_xlabel('Time (days)')
-    axes[1].set_ylim(-0.1, 1.1)
+    axes[1].fill_between(t_days_s, 0, sl_lvl, step='mid',
+                         color='midnightblue', alpha=0.7,
+                         label='sleep level')
+    axes[1].set_yticks([0, 1, 2])
+    axes[1].set_yticklabels(['wake', 'light+rem', 'deep'])
+    axes[1].set_ylim(-0.3, 2.3)
+    axes[1].set_ylabel('Sleep stage')
     axes[1].legend(loc='upper right', fontsize=8)
     axes[1].grid(True, alpha=0.3)
 
-    fig.suptitle('SWAT SDE  —  Observations', fontsize=12)
+    # ── Panel 3: steps (Poisson, 15-min bins) ──
+    st_chan = channel_outputs.get('steps', {})
+    if 'steps' in st_chan:
+        st_t_idx = st_chan['t_idx']
+        st_counts = st_chan['steps']
+        st_days = t_grid[st_t_idx] / 24.0
+        # Bar width = 15 min in units of days
+        bar_w = 0.25 / 24.0 * 0.9
+        axes[2].bar(st_days, st_counts, width=bar_w, color='seagreen',
+                    alpha=0.7, edgecolor='none',
+                    label=f'steps/15min (Poisson)')
+        # Overlay the deterministic rate curve for reference
+        W = trajectory[:, 0]
+        rate = (params['lambda_base'] + params['lambda_step'] *
+                _sigmoid(10.0 * (W - params['W_thresh']))) * 0.25
+        axes[2].plot(t_days, rate, lw=0.6, color='darkgreen', alpha=0.6,
+                     label='expected count (rate × bin)')
+    axes[2].set_ylabel('Steps per 15 min')
+    axes[2].legend(loc='upper right', fontsize=8)
+    axes[2].grid(True, alpha=0.3)
+
+    # ── Panel 4: Garmin stress ──
+    sr_chan = channel_outputs.get('stress', {})
+    if 'stress_score' in sr_chan:
+        sr_t_idx = sr_chan['t_idx']
+        sr_val = sr_chan['stress_score']
+        sr_days = t_grid[sr_t_idx] / 24.0
+        # Predicted stress (deterministic part)
+        W = trajectory[:, 0]
+        Vn = trajectory[:, 6]
+        sr_pred = (params['s_base'] + params['alpha_s'] * W +
+                   params['beta_s'] * Vn)
+        axes[3].plot(t_days, sr_pred, color='purple', lw=0.6, alpha=0.6,
+                     label='stress mean (from W, V_n)')
+        axes[3].scatter(sr_days, sr_val, s=1.5, alpha=0.35, color='darkviolet',
+                        label=f"stress obs (sigma_s={params['sigma_s']:.1f})")
+    axes[3].set_ylabel('Stress (0-100)')
+    axes[3].set_xlabel('Time (days)')
+    axes[3].set_ylim(-5, 105)
+    axes[3].legend(loc='upper right', fontsize=8)
+    axes[3].grid(True, alpha=0.3)
+
+    fig.suptitle('SWAT SDE  —  Observations (HR, sleep 3-level, steps, stress)',
+                 fontsize=12)
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
@@ -248,38 +332,44 @@ def _plot_observations(trajectory, t_grid, channel_outputs, params, save_path):
 # =========================================================================
 
 def _plot_entrainment(trajectory, t_grid, params, save_path):
-    """Three-panel plot: E(t), mu(E), T vs T*.
+    """Three-panel plot showing BOTH entrainment measures:
 
-    Shows the Stuart-Landau bifurcation in action:
-      - E in [0, 1] (top).
-      - mu(E) = mu_0 + mu_E * E with the critical line mu = 0 (middle).
-      - T trajectory (red) vs sqrt(mu/eta) when mu > 0 (green dashed) or
-        0 when mu < 0 (gray dashed) (bottom).
+      Panel 1: E_dyn (solid) = what drives mu(E) inside the SDE dynamics
+               E_obs (dashed) = windowed amp × phase-correlation diagnostic
+               E_crit horizontal reference line
+
+      Panel 2: mu(E_dyn) — the actual bifurcation parameter driving T.
+               mu = 0 pitchfork line, shaded regions for pulsatile vs flatline basin.
+
+      Panel 3: T(t) actual vs T* = sqrt(mu(E_dyn)/eta) (when mu > 0).
     """
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
     t_days = t_grid / 24.0
 
-    # Compute E and mu along the trajectory
-    E = _compute_E(trajectory, t_grid, params)
-    mu = params['mu_0'] + params['mu_E'] * E
-    E_crit = -params['mu_0'] / params['mu_E']  # E threshold for bifurcation
+    # Compute BOTH E quantities
+    E_dyn = _compute_E_dynamics(trajectory, params)
+    E_obs = _compute_E(trajectory, t_grid, params)
+    mu = params['mu_0'] + params['mu_E'] * E_dyn
+    E_crit = -params['mu_0'] / params['mu_E']
 
-    # Expected stable T equilibrium given current mu
     T_star = np.where(mu > 0,
                        np.sqrt(np.maximum(mu, 0.0) / params['eta']),
                        0.0)
     T_actual = trajectory[:, 3]
 
-    # ── Panel 1: E(t) ──
-    axes[0].plot(t_days, E, lw=0.8, color='purple')
-    axes[0].axhline(E_crit, ls='--', color='red', alpha=0.6,
-                    label=f"E_crit = {E_crit:.2f} (bifurcation threshold)")
+    # ── Panel 1: BOTH E curves ──
+    axes[0].plot(t_days, E_dyn, lw=1.0, color='darkviolet',
+                 label='E_dyn (drives μ in SDE)')
+    axes[0].plot(t_days, E_obs, lw=0.8, ls='--', color='darkorange',
+                 label='E_obs (24h windowed, diagnostic)')
+    axes[0].axhline(E_crit, ls=':', color='red', alpha=0.7,
+                    label=f"E_crit = {E_crit:.2f}")
     axes[0].set_ylabel('E(t)  (entrainment quality)')
     axes[0].set_ylim(-0.05, 1.05)
     axes[0].legend(loc='upper right', fontsize=8)
     axes[0].grid(True, alpha=0.3)
 
-    # ── Panel 2: mu(E) vs 0 ──
+    # ── Panel 2: mu(E_dyn) ──
     axes[1].plot(t_days, mu, lw=0.8, color='darkgreen')
     axes[1].axhline(0, ls='--', color='red', alpha=0.6,
                     label='mu = 0 (pitchfork)')
@@ -289,7 +379,7 @@ def _plot_entrainment(trajectory, t_grid, params, save_path):
     axes[1].fill_between(t_days, 0, mu, where=(mu < 0),
                          color='red', alpha=0.15,
                          label='mu < 0 (flatline basin)')
-    axes[1].set_ylabel('mu(E)  (bifurcation param)')
+    axes[1].set_ylabel('mu(E_dyn)  (bifurcation param)')
     axes[1].legend(loc='upper right', fontsize=8)
     axes[1].grid(True, alpha=0.3)
 
@@ -304,7 +394,8 @@ def _plot_entrainment(trajectory, t_grid, params, save_path):
     axes[2].legend(loc='upper right', fontsize=8)
     axes[2].grid(True, alpha=0.3)
 
-    basin = _basin_label(trajectory[0, 5], trajectory[0, 6])
+    basin = _basin_label(trajectory[0, 5], trajectory[0, 6],
+                         params.get('V_c', 0.0))
     fig.suptitle(
         f"SWAT — Entrainment → Bifurcation → Testosterone  "
         f"({basin};  tau_T = {params['tau_T']:.1f}h)",
@@ -318,8 +409,18 @@ def _plot_entrainment(trajectory, t_grid, params, save_path):
 # BASIN LABEL (inherited from sleep_wake_20p)
 # =========================================================================
 
-def _basin_label(Vh, Vn):
-    """Map (V_h, V_n) to the 2x2 basin label (proof doc Section 2.6)."""
+def _basin_label(Vh, Vn, V_c=0.0):
+    """Map (V_h, V_n, V_c) to a scenario label.
+
+    V_c phase-shift pathology takes priority over V_h/V_n — a subject
+    with healthy potentials but a misaligned rhythm is still pathological.
+    """
+    # Phase-shift pathology takes priority (|V_c| > 1h is clinically meaningful)
+    if abs(V_c) >= 2.0:
+        if abs(V_c) >= 8.0:
+            return f"phase-inverted (V_c={V_c:+.1f}h)"
+        return f"phase-shifted (V_c={V_c:+.1f}h)"
+
     Vh_high = Vh >= 0.6
     Vn_high = Vn >= 1.0
     if Vh_high and not Vn_high:

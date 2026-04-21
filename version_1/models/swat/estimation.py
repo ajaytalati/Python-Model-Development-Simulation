@@ -102,8 +102,42 @@ PARAM_PRIOR_CONFIG = OrderedDict([
     # contribution alpha_T * T ~ 0.3 is comparable to the V_h contribution.
     ('alpha_T',  ('lognormal', (math.log(0.3),  0.3))),
     # T_T: small process-noise temperature.  Matches the order of the
-    # other diffusion temps.
-    ('T_T',      ('lognormal', (math.log(0.01), 0.5))),
+    # other diffusion temps.  Reduced from 0.01 to 0.0001 so T doesn't
+    # drift wildly on the 48h timescale.
+    ('T_T',      ('lognormal', (math.log(0.0001), 0.5))),
+
+    # ── 3-level ordinal sleep channel (Phase 1 addition) ──────────────
+    # delta_c: gap between light/deep thresholds on Zt; c2 = c_tilde + delta_c.
+    # Must be positive (ordering constraint satisfied automatically by LogNormal).
+    # Prior centred on 1.5: with c_tilde ~ 3 and Zt_peak ~ 5, the deep stage
+    # (Zt > 4.5) occupies the top ~30% of sleep time — matches typical sleep
+    # architecture where deep sleep is ~20-25% of total sleep.
+    ('delta_c',  ('lognormal', (math.log(1.5),  0.3))),
+
+    # ── Steps Poisson channel (Phase 1 addition) ──────────────────────
+    # lambda_base: step rate during sleep (true zero + small sensor noise).
+    # Expected ~0.5 steps/hour; LogNormal with wide prior to allow near-zero.
+    ('lambda_base', ('lognormal', (math.log(0.5),  0.7))),
+    # lambda_step: peak step rate during wake.  ~200 steps/hour sustained
+    # activity corresponds to a normal active day; LogNormal prior covers
+    # sedentary-awake (50/h) to very-active (800/h).
+    ('lambda_step', ('lognormal', (math.log(200.0), 0.5))),
+    # W_thresh: wakefulness threshold above which step rate activates.
+    # Normal centred on 0.6 covers drowsy-to-alert transition.
+    ('W_thresh',    ('normal',    (0.6, 0.1))),
+
+    # ── Garmin stress channel (Phase 1 addition) ──────────────────────
+    # s_base: baseline stress score (W=0, V_n=0).  Normal on 0-100 scale.
+    ('s_base',   ('normal',    (30.0, 10.0))),
+    # alpha_s: wake modulation of stress.  Normal centred on 40 (W=0->30,
+    # W=1 -> 70) — typical Garmin stress range for sedentary-wake.
+    ('alpha_s',  ('normal',    (40.0, 10.0))),
+    # beta_s: coupling of stress to nuisance-load V_n.  LogNormal centred
+    # on 10 — provides the cross-channel constraint that disambiguates
+    # V_n from V_h (both appear in u_W; only V_n is in the stress model).
+    ('beta_s',   ('lognormal', (math.log(10.0), 0.5))),
+    # sigma_s: stress observation noise (0-100 scale).  LogNormal prior.
+    ('sigma_s',  ('lognormal', (math.log(15.0), 0.3))),
 ])
 
 # 3 old ICs + 1 new (T_0).

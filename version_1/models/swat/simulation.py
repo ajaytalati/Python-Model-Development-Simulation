@@ -313,20 +313,99 @@ def gen_hr(trajectory, t_grid, params, aux, prior_channels, seed):
 
 
 def gen_sleep(trajectory, t_grid, params, aux, prior_channels, seed):
-    """Binary sleep channel: sleep_label ~ Bernoulli(sigma(Zt - c_tilde))."""
+    """3-level ordinal sleep channel: sleep_level in {0=wake, 1=light+rem, 2=deep}.
+
+    Two thresholds c1 < c2 on the Zt state:
+        P(wake)      = 1 - sigma(Zt - c1)
+        P(light+rem) = sigma(Zt - c1) - sigma(Zt - c2)
+        P(deep)      = sigma(Zt - c2)
+
+    Parameterised as (c_tilde, delta_c > 0) with c1 = c_tilde, c2 = c_tilde + delta_c.
+    """
     del aux, prior_channels
     rng = np.random.default_rng(seed)
     Zt = trajectory[:, 1]
     p = params
     T_len = len(t_grid)
 
-    prob_sleep = _sigmoid(Zt - p['c_tilde']).astype(np.float64)
+    c1 = p['c_tilde']
+    c2 = c1 + p['delta_c']
+
+    s1 = _sigmoid(Zt - c1).astype(np.float64)   # P(sleep, any) = 1 - P(wake)
+    s2 = _sigmoid(Zt - c2).astype(np.float64)   # P(deep)
+
+    # Cumulative probabilities: cum0 = P(level <= 0) = 1 - s1
+    #                          cum1 = P(level <= 1) = 1 - s2
     draws = rng.random(size=T_len)
-    labels = (draws < prob_sleep).astype(np.int32)
+    labels = np.where(draws < 1.0 - s1, 0,
+             np.where(draws < 1.0 - s2, 1, 2)).astype(np.int32)
 
     return {
         't_idx': np.arange(T_len, dtype=np.int32),
-        'sleep_label': labels,
+        'sleep_level': labels,   # 0=wake, 1=light+rem, 2=deep
+    }
+
+
+def gen_steps(trajectory, t_grid, params, aux, prior_channels, seed):
+    """Poisson step-count channel on 15-minute bins.
+
+    Rate:
+        r(W) = lambda_base + lambda_step * sigma(10 * (W - W_thresh))
+    Bin count:
+        k_bin ~ Poisson(r(W_bin) * bin_hours)
+
+    where W_bin is the mean wakefulness over the 15-min bin.
+    """
+    del aux, prior_channels
+    rng = np.random.default_rng(seed)
+    W = trajectory[:, 0]
+    p = params
+    dt_h = float(t_grid[1] - t_grid[0])
+
+    # 15-min bin size (in sample count)
+    bin_hours = 0.25
+    bin_size = max(int(round(bin_hours / dt_h)), 1)
+    n_bins = len(t_grid) // bin_size
+
+    # Mean W per bin
+    W_trunc = W[: n_bins * bin_size].reshape(n_bins, bin_size).mean(axis=1)
+
+    rate = p['lambda_base'] + p['lambda_step'] * _sigmoid(
+        10.0 * (W_trunc - p['W_thresh']))
+    expected = rate * bin_hours
+    k = rng.poisson(expected).astype(np.int32)
+
+    # Timestamp for each bin = bin start
+    bin_t_idx = (np.arange(n_bins) * bin_size).astype(np.int32)
+
+    return {
+        't_idx':      bin_t_idx,
+        'steps':      k,
+        'bin_hours':  np.float32(bin_hours),
+    }
+
+
+def gen_stress(trajectory, t_grid, params, aux, prior_channels, seed):
+    """Gaussian stress-score channel: stress = s_base + alpha_s * W + beta_s * Vn + N(0, sigma_s^2).
+
+    Note: V_n is constant in Phase 1 so the stress channel's time variation
+    comes solely from W.  The coupling to V_n acts as a subject-level offset
+    that helps disambiguate V_n from V_h (which both feed u_W).
+    """
+    del aux, prior_channels
+    rng = np.random.default_rng(seed)
+    W  = trajectory[:, 0]
+    Vn = trajectory[:, 6]
+    p = params
+    T_len = len(t_grid)
+
+    mean = p['s_base'] + p['alpha_s'] * W + p['beta_s'] * Vn
+    stress = mean + rng.normal(0.0, p['sigma_s'], size=T_len)
+    stress = np.clip(stress, 0.0, 100.0)
+
+    return {
+        't_idx':        np.arange(T_len, dtype=np.int32),
+        'stress_score': stress.astype(np.float32),
     }
 
 
@@ -395,6 +474,20 @@ PARAM_SET_A = {
     'tau_T':     48.0,
     'alpha_T':    0.3,
     'T_T':        0.0001,
+
+    # ── New 3-level ordinal sleep channel ────────────────────
+    'delta_c':    1.5,    # c2 = c_tilde + delta_c; c1=3.0 -> c2=4.5 (deep threshold)
+
+    # ── New steps Poisson channel ────────────────────────────
+    'lambda_base': 0.5,    # rare steps during sleep (~0.5 steps/h)
+    'lambda_step': 200.0,  # peak rate during wake (~50 steps/15min bin)
+    'W_thresh':    0.6,    # threshold above which step rate activates
+
+    # ── New Garmin stress channel ────────────────────────────
+    's_base':     30.0,    # baseline stress score
+    'alpha_s':    40.0,    # wake modulation (W=0 -> 30, W=1 -> 70)
+    'beta_s':     10.0,    # nuisance-load modulation (V_n=0.3 -> +3, V_n=3.5 -> +35)
+    'sigma_s':    15.0,    # observation noise on 0-100 scale
 }
 
 INIT_STATE_A = {
@@ -472,8 +565,10 @@ SWAT_MODEL = SDEModel(
     make_y0_fn=make_y0,
 
     channels=(
-        ChannelSpec("hr",    depends_on=(), generate_fn=gen_hr),
-        ChannelSpec("sleep", depends_on=(), generate_fn=gen_sleep),
+        ChannelSpec("hr",     depends_on=(), generate_fn=gen_hr),
+        ChannelSpec("sleep",  depends_on=(), generate_fn=gen_sleep),
+        ChannelSpec("steps",  depends_on=(), generate_fn=gen_steps),
+        ChannelSpec("stress", depends_on=(), generate_fn=gen_stress),
     ),
 
     plot_fn=plot_swat,

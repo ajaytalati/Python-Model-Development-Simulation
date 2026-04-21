@@ -1,0 +1,8 @@
+Mean E (excluding day 0, up to 85%): 0.208
+mu(E): -0.292
+T* predicted: 0.000
+T  observed:  0.537
+Relative error: 53721.59%
+
+Note: plot-side E uses amp x phase windowed formula; dynamics-side uses older slow-backdrop formula.
+Known prototype inconsistency - see TESTING.md 8.6.

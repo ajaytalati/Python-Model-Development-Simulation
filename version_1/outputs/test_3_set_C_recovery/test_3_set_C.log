@@ -1,0 +1,56 @@
+=================================================================
+  SDE TESTING DATA FRAMEWORK — SIMULATOR
+  Date:    2026-04-21 20:31:35
+  Version: 2.0
+  Model:   swat v1.0
+  States:  7 (W, Zt, a, T, C, Vh, Vn)
+  Channels: 4 (hr, sleep, steps, stress)
+  Param set: C
+  Solver:  diffrax
+  Seed:    42
+=================================================================
+  Grid:    4032 steps × 5-min = 14 days
+
+  Simulating SDE...
+  WARNING: JAX/Diffrax not available (No module named 'diffrax') — falling back to scipy
+  Solver: scipy Euler-Maruyama (fallback)
+  SDE solved in 0.9s
+
+  State ranges:
+         W: [0.0000, 1.0000]
+        Zt: [0.0000, 3.6266]
+         a: [0.0000, 1.2594]
+         T: [0.0459, 0.4824]
+         C: [-1.0000, 1.0000]
+        Vh: [1.0000, 1.0000]
+        Vn: [0.3000, 0.3000]
+
+  Generating observations...
+    hr: 4032 observations
+    sleep: 4032 observations
+    steps: 1344 observations
+    stress: 4032 observations
+
+  Saved: outputs/_tmp_C/synthetic_swat_C_20260421_203136/
+
+  Physics verification:
+  W_in_0_1                           PASS
+  Zt_in_0_A                          PASS
+  a_nonneg                           PASS
+  T_nonneg                           PASS
+  T_bounded                          PASS
+  W_range                        1.0
+  Zt_range                       3.6266110954293644
+  T_range                        0.4364958664691322
+  T_mean                         0.2446627542864009
+  all_finite                         PASS
+
+  PASS: physics verification
+
+  Generating plots...
+  Plot: outputs/_tmp_C/synthetic_swat_C_20260421_203136/latent_states.png
+  Plot: outputs/_tmp_C/synthetic_swat_C_20260421_203136/observations.png
+  Plot: outputs/_tmp_C/synthetic_swat_C_20260421_203136/entrainment.png
+
+  Total wall time: 2.1s
+  Done.

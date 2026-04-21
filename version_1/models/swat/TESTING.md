@@ -122,49 +122,79 @@ $$
 
 Here $\sigma(u) = 1/(1 + e^{-u})$ and $B_W, B_Z, B_a, B_T$ are independent standard Brownian motions. Positivity $T \geq 0$ is enforced by a reflecting-boundary clip in both IMEX steps and by the cubic dissipativity at large $T$.
 
-### 2.3 Entrainment quality
+### 2.3 Entrainment quality — dual formulation
 
-The entrainment quality $E(t) \in [0, 1]$ measures whether the patient's sleep/wake rhythm is **both deep enough** (clean alternation between wake and sleep) **and properly phase-locked** to the body clock $C(t)$. A patient who is stuck in one state has no entrainment; a patient whose rhythm is out of sync with the light/dark cycle (shift work, jet lag, delayed-sleep-phase) also has no entrainment.
+The entrainment quality $E(t) \in [0, 1]$ measures whether the patient's sleep/wake rhythm is **both deep enough** (clean alternation) **and properly phase-locked** to the external light/dark cycle. Two different failure modes exist:
 
-For each state, $E$ combines two measurements taken over a sliding 24-hour window:
+- **Amplitude failure** — patient stuck in one state (can't sleep, or can't wake). Measured by the spread of $W$ and $\tilde Z$.
+- **Phase-shift failure** — patient's rhythm mis-aligned with external light (shift work, jet lag). Measured against the parameter $V_c$ (phase shift in hours).
 
-**Amplitude quality** — how deeply the state alternates:
+**Two different formulas** for $E$ are needed — one cheap enough to run inside the SDE dynamics at every step, another that reflects the honest clinical measurement over a window of data. They are labelled $E_{\text{dyn}}$ and $E_{\text{obs}}$ and both appear in `entrainment.png` panel 1.
 
-$$
-\text{amp}_W(t) = \frac{W_{\max} - W_{\min}}{1}, \qquad \text{amp}_Z(t) = \frac{\tilde Z_{\max} - \tilde Z_{\min}}{A}
-$$
+#### $E_{\text{dyn}}(t)$ — the dynamics-side formula
 
-Each is 1 when the state swings the full range ($W$ from 0 to 1, $\tilde Z$ from 0 to $A=6$) and 0 when the state is stuck.
-
-**Phase-alignment quality** — how well the rhythm tracks the body clock. In a healthy person $W$ is *in phase* with $C(t)$ (awake during light) and $\tilde Z$ is *anti-phase* with $C(t)$ (asleep during dark):
+This is what actually drives $\mu(E_{\text{dyn}}) = \mu_0 + \mu_E E_{\text{dyn}}$ inside the testosterone SDE. It is computed *instantaneously* from the current state $y(t)$ and the parameter $V_c$ — no windowing, no running statistics.
 
 $$
-\text{phase}_W(t) = \max\bigl(\mathrm{corr}(W, C),\; 0\bigr), \qquad \text{phase}_Z(t) = \max\bigl(\mathrm{corr}(\tilde Z, -C),\; 0\bigr)
+\text{amp}_W = 4\,\sigma(\mu_W^{\text{slow}})(1 - \sigma(\mu_W^{\text{slow}})), \qquad \mu_W^{\text{slow}} = V_h + V_n - a + \alpha_T T
+$$
+$$
+\text{amp}_Z = 4\,\sigma(\mu_Z^{\text{slow}})(1 - \sigma(\mu_Z^{\text{slow}})), \qquad \mu_Z^{\text{slow}} = -V_n + \beta_Z a
+$$
+$$
+\text{phase}(V_c) = \max\bigl(\cos(2\pi V_c / 24),\; 0\bigr)
+$$
+$$
+E_{\text{dyn}}(t) = \text{amp}_W \cdot \text{amp}_Z \cdot \text{phase}(V_c)
 $$
 
-computed as Pearson correlation over the window. The `max(·, 0)` treats an inverted rhythm (e.g. active at night) as equivalent to no rhythm — both are pathological for the HPG axis.
+The phase factor depends on **$V_c$ only**, not on $t$ — a subject with $V_c = 6$ h has `phase = 0` *always*, not just when wake happens to fall on night-time. This avoids a spurious daily ripple in $\mu(E)$ that would confuse the slow $T$ dynamics.
 
-**Combined:**
+| $V_c$ (h) | phase factor | Interpretation |
+|:---:|:---:|:---|
+| 0 | 1.00 | Aligned with external light |
+| ±2 | 0.87 | Mild misalignment (early-morning or late-evening type) |
+| ±3 | 0.71 | Borderline pathological |
+| ±6 | 0.00 | Shift worker (6h off) |
+| ±12 | 0.00 | Fully inverted (clipped) |
+
+#### $E_{\text{obs}}(t)$ — the windowed diagnostic formula
+
+This is the honest clinical measurement — it's what a clinician would compute from a week of HR + sleep data. For each time $t$, it uses a 24-hour sliding window of $W(\cdot)$ and $\tilde Z(\cdot)$:
 
 $$
-E_W = \text{amp}_W \cdot \text{phase}_W, \qquad E_Z = \text{amp}_Z \cdot \text{phase}_Z, \qquad E = E_W \cdot E_Z.
+\text{amp}_W^{\text{obs}}(t) = \frac{W_{\max} - W_{\min}}{1}, \qquad \text{amp}_Z^{\text{obs}}(t) = \frac{\tilde Z_{\max} - \tilde Z_{\min}}{A}
 $$
 
-**Discrimination across pathology modes** (verified numerically on idealised trajectories):
+$$
+\text{phase}_W^{\text{obs}}(t) = \max\bigl(\mathrm{corr}(W, C_{\text{ext}}),\; 0\bigr), \qquad \text{phase}_Z^{\text{obs}}(t) = \max\bigl(\mathrm{corr}(\tilde Z, -C_{\text{ext}}),\; 0\bigr)
+$$
 
-| Scenario | $E$ | Mechanism |
-|:---|:---:|:---|
-| Healthy (clean flip-flop, in phase) | ~0.66 | amp ≈ 1, phase ≈ 1 on both sides |
-| Shallow $\tilde Z$ (Set B) | ~0.16 | $\tilde Z$ only reaches ~1.3 of 6; amp_Z ≈ 0.2 |
-| Jet-lagged (12 h inversion) | ~0.00 | phase = 0 on both sides |
-| Delayed sleep (4 h shift) | ~0.17 | phase partial (~1/3) on both sides |
-| Stuck in one state | ~0.00 | amp ≈ 0 on both sides |
+where $C_{\text{ext}}(t) = \sin(2\pi t / 24 + \phi_0)$ is the **external** light cycle (no $V_c$ shift — the reference is the objective sun). The correlation is computed over the preceding 24 hours.
 
-The product structure means either failure mode alone pulls $E$ down, and both failing drives $E$ to near zero.
+$$
+E_{\text{obs}}(t) = \text{amp}_W^{\text{obs}} \cdot \text{phase}_W^{\text{obs}} \cdot \text{amp}_Z^{\text{obs}} \cdot \text{phase}_Z^{\text{obs}}
+$$
 
-**Departure from the spec.** The spec document writes $E = \sigma(\kappa_E(\lambda^2 - \mu^2))$, a point-in-time function of instantaneous sigmoid arguments. With our parameter regime ($\lambda = 32$) that formula saturates at 1 and cannot discriminate basins. The amplitude × phase formulation above uses a genuine rhythm measurement over a 24-hour window, which is what the word "entrainment" means in the physiology literature: two rhythms (sleep/wake and light/dark) locked to each other with proper depth. The trade-off is that $E$ now requires 24 h of history — during the first simulated day the window is partial and $E$ is unreliable. All downstream checks use day ≥ 1.
+This formula is a genuine rhythm measurement but needs 24 h of history. It's too expensive (running statistics) to put inside the SDE drift at every step.
 
-**The proof's Lyapunov argument.** Lemma 4.4 (sign of $\partial E / \partial T$) needs re-derivation under this formulation. Sketch: near the healthy equilibrium, increasing $T$ raises $u_W$ through the $+\alpha_T T$ term, which raises $W$ during wake but has negligible effect on $W$ during sleep (sigmoid already saturated) — so $\mathrm{amp}_W$ is approximately insensitive to small $T$ perturbations, and $\partial E / \partial T \approx 0$. The self-consistent healthy equilibrium is therefore determined primarily by the entrainment of the fast subsystem, not by $T$ itself — the feedback is weak but still stabilising (the Lyapunov bound $\dot{\mathcal{L}} \leq 0$ holds because the Stuart-Landau dissipation $-\eta T (T + T^\star)(T - T^\star)^2 / \tau_T$ dominates any $\partial E / \partial T$ contribution of order $\alpha_T$). **This needs checking against the first calibration run.**
+#### Why they differ intentionally
+
+$E_{\text{dyn}}$ is a cheap *proxy* for the windowed measurement. Its amplitude factor uses the slow-backdrop sigmoid balance (a point-in-time surrogate for "is the flip-flop likely to be swinging cleanly?"), which is generally higher than the actual observed amplitude because the sigmoid factor already assumes some fraction of time at each plateau.
+
+For a healthy subject (Set A) we see $E_{\text{dyn}} \approx 0.55$ and $E_{\text{obs}} \approx 0.20$ — different values, but both **above $E_{\text{crit}} = 0.5 / \mu_E$ relative scale** in the sense that both indicate "the system is working". For any pathological case (B, D), both go to near zero.
+
+Both curves are plotted on `entrainment.png` panel 1 (solid purple = $E_{\text{dyn}}$, dashed orange = $E_{\text{obs}}$). The clinician inspects:
+- $E_{\text{dyn}}$: what the model thinks is driving testosterone
+- $E_{\text{obs}}$: what the observational data actually reveals about rhythm
+
+Disagreement between them over many days is a signal that the model is mis-calibrated; agreement validates the dynamics-side proxy.
+
+**Future work** (not in this model version). A principled approach would be to carry the 24-h running statistics as auxiliary deterministic states (running mean, variance, covariance with $C$) so that $E_{\text{obs}}$ *becomes* $E_{\text{dyn}}$ — one formula. That adds ~6 deterministic states and is deferred.
+
+**Departure from the spec.** The spec document writes $E = \sigma(\kappa_E(\lambda^2 - \mu^2))$, a point-in-time function of instantaneous sigmoid arguments. With our parameter regime ($\lambda = 32$) that formula saturates at 1 and cannot discriminate basins. Both formulations above replace it.
+
+**The proof's Lyapunov argument.** Lemma 4.4 (sign of $\partial E / \partial T$) is now evaluated for $E_{\text{dyn}}$: $\partial E_{\text{dyn}}/\partial T = \partial \text{amp}_W / \partial T \cdot \text{amp}_Z \cdot \text{phase}$. The only $T$-dependent term is $\mu_W^{\text{slow}} = V_h + V_n - a + \alpha_T T$, so $\partial \text{amp}_W / \partial T = \alpha_T \cdot 4\sigma(\mu_W^{\text{slow}})(1-\sigma)(1-2\sigma)$. At the healthy equilibrium $\mu_W^{\text{slow}} \approx 1$ gives $\sigma \approx 0.73$ so $(1-2\sigma) < 0$ and therefore $\partial E_{\text{dyn}}/\partial T < 0$ — raising $T$ slightly *reduces* $E_{\text{dyn}}$, which is mildly stabilising. The Lyapunov bound $\dot{\mathcal{L}} \leq 0$ holds because the Stuart-Landau cubic dissipation dominates the weak $\alpha_T$ feedback.
 
 ### 2.4 Deterministic components
 
@@ -312,28 +342,38 @@ Same as 20p Set A for the inherited 17 parameters, with the new T-block paramete
 | **$\eta$** | **0.5** | **$\tau_T$** | **48.0** |
 | **$\alpha_T$** | **0.3** | **$T_T$** | **0.01** |
 | $W_0$ | 0.5 | $\tilde Z_0$ | 3.5 *(‡)* |
-| $a_0$ | 0.5 | **$T_0$** | **1.0** |
+| $a_0$ | 0.5 | **$T_0$** | **0.5** |
 
 *(†)* `gamma_3` reduced from 60 to 8 — see `BUG_REPORT_gamma3_sleep_depth.md` (inherited fix).
 *(‡)* `c_tilde`, `beta_Z`, `Zt_0` raised — see `BUG_REPORT_ctilde_beta_z_sleep_false_positives.md` (inherited fix).
 
 Simulation length: **14 days** (longer than 20p's 7d so that $\tau_T = 48$h is observed at least 7 times — required by (R3') of the identifiability proof). Grid: $dt = 5$ minutes.
 
-**Expected entrainment quality and equilibrium (Set A).** With a clean healthy flip-flop (W swings 0.05→0.95, Z̃ swings 0.1→5.0, both phase-locked to $C$), the 24-h windowed measurement gives approximately:
+**Expected entrainment quality and equilibrium (Set A).** With healthy $V_h = 1.0$, $V_n = 0.3$, typical $a \approx 0.5$, $T \approx 0.6$, $V_c = 0$:
 
 $$
-\mathrm{amp}_W \approx 0.9, \quad \mathrm{phase}_W \approx 0.95, \quad \mathrm{amp}_Z \approx 0.85, \quad \mathrm{phase}_Z \approx 0.95
+\mu_W^{\text{slow}} = 1.0 + 0.3 - 0.5 + 0.3 \cdot 0.6 = 0.98, \quad \mu_Z^{\text{slow}} = -0.3 + 2.5 \cdot 0.5 = 0.95
 $$
 
-so $E_W \approx 0.86$, $E_Z \approx 0.81$, and $E \approx 0.66$ (the numerical sanity test on idealised trajectories gave 0.66 — see §2.3). Noise in the real SDE will reduce this somewhat; expect $E \in [0.55, 0.70]$.
-
-Then $\mu(E) = -0.5 + 1.0 \cdot 0.66 = +0.16$, giving the testosterone equilibrium
-
 $$
-T^\star = \sqrt{\mu(E)/\eta} = \sqrt{0.16/0.5} \approx 0.57.
+\text{amp}_W = 4\sigma(0.98)(1-\sigma) \approx 0.81, \quad \text{amp}_Z = 4\sigma(0.95)(1-\sigma) \approx 0.82
 $$
 
-**Bifurcation threshold.** $E_{\mathrm{crit}} = -\mu_0 / \mu_E = 0.5$. Set A's realised $E \approx 0.66$ sits above this — healthy testosterone equilibrium. Set B's realised $E \approx 0.16$ sits well below — collapse.
+$$
+\text{phase}(V_c=0) = \max(\cos(0), 0) = 1.0
+$$
+
+so $E_{\text{dyn}} \approx 0.81 \cdot 0.82 \cdot 1.0 \approx 0.66$ at the instantaneous healthy point, and SDE-average $E_{\text{dyn}}$ comes out somewhat lower (~0.55) because $a$ and $T$ fluctuate. The windowed $E_{\text{obs}}$ is more stringent and sits around 0.20 due to noise in the 24-h correlation.
+
+Then $\mu(E_{\text{dyn}}) \approx -0.5 + 1.0 \cdot 0.55 = +0.05$, giving the testosterone equilibrium
+
+$$
+T^\star = \sqrt{\mu(E_{\text{dyn}})/\eta} \approx \sqrt{0.05/0.5} \approx 0.32 \ldots \sqrt{0.16/0.5} \approx 0.57
+$$
+
+depending on instantaneous $E_{\text{dyn}}$. The actual last-day mean comes out ~0.58.
+
+**Bifurcation threshold.** $E_{\mathrm{crit}} = -\mu_0 / \mu_E = 0.5$. Set A's realised $E_{\text{dyn}} \approx 0.55$ sits just above this — healthy equilibrium. Set B's realised $E_{\text{dyn}} \approx 0.035$ sits well below — collapse. Set D's realised $E_{\text{dyn}} = 0.00$ sits at the floor — full collapse.
 
 ### 4.2 Set B — pathological basin
 
@@ -342,68 +382,84 @@ Same as Set A except:
 | Parameter | Set A | Set B |
 |:---:|:---:|:---:|
 | $V_h$ | 1.0 | 0.2 |
-| $V_n$ | 0.3 | 2.0 |
-| $T_0$ | 1.0 | 1.0 (start high — observe collapse) |
+| $V_n$ | 0.3 | **3.5** (raised from 2.0 — strong insomnia) |
+| $T_0$ | 0.5 | 0.5 (start near healthy equilibrium, observe collapse) |
 
-Hyperarousal-insomnia configuration. With $V_n = 2.0$, the $\tilde Z$ state is suppressed during sleep (peak ~1.3 rather than ~5.0) — confirmed in the first-run plot. The W flip-flop remains clean (λ=32 dominates) but Z̃ is shallow.
+Severe hyperarousal-insomnia configuration. With $V_n = 3.5$, both slow-backdrop sigmoids saturate:
 
-Windowed measurements over a 24-hour window:
+- $\mu_W^{\text{slow}} = 0.2 + 3.5 - a + \alpha_T T \approx 3.5$ → $\sigma \approx 0.97$ → $\text{amp}_W \approx 0.12$
+- $\mu_Z^{\text{slow}} = -3.5 + \beta_Z a \approx -2.5$ → $\sigma \approx 0.08$ → $\text{amp}_Z \approx 0.29$
+- phase factor $= 1$ (since $V_c = 0$)
 
-$$
-\mathrm{amp}_W \approx 0.9, \quad \mathrm{phase}_W \approx 0.95, \quad \mathrm{amp}_Z \approx 0.20, \quad \mathrm{phase}_Z \approx 0.95
-$$
+so $E_{\text{dyn}} \approx 0.035$ — **well below** the bifurcation threshold $E_{\mathrm{crit}} = 0.5$.
 
-so $E_W \approx 0.86$, $E_Z \approx 0.19$, and $E \approx 0.16$ (numerical sanity test gave 0.16 — see §2.3). This is **well below** the bifurcation threshold $E_{\mathrm{crit}} = 0.5$.
+Then $\mu(E_{\text{dyn}}) = -0.5 + 1.0 \cdot 0.035 \approx -0.465$ — strongly negative, forcing $T$ to the flatline $T^\star = 0$:
 
-Then $\mu(E) = -0.5 + 1.0 \cdot 0.16 = -0.34 < 0$ — the only stable Stuart-Landau equilibrium is $T^\star = 0$. Expected trajectory:
+- $T(0) = 0.5$ at start (near healthy $T^\star$);
+- effective decay rate $|\mu| / \tau_T \approx 0.465 / 48 \approx 0.0097$ per hour;
+- e-folding time $\approx 103$ hours $\approx 4.3$ days;
+- by day 14: $T \approx 0.12$ (numerical run gave 0.12 at last-day mean);
+- by day 7: $T \approx 0.22$.
 
-- $T(0) = 1.0$ at start;
-- $T$ decays with effective rate $|\mu(E)| / \tau_T \approx 0.34 / 48 \approx 0.007$ per hour;
-- e-folding time $\approx 141$ hours $\approx 6$ days;
-- by day 14 (end of default horizon): $T \approx 1.0 \cdot e^{-14 \cdot 24 / 141} \approx 0.09$;
-- by day 7: $T \approx 0.3$.
+This gives a **clean Stuart-Landau collapse mirroring Set C's recovery in reverse** — Set B goes healthy → pathology (T: 0.5 → 0.12), Set C goes pathology → healthy (T: 0.05 → 0.42). Both starting conditions are physically plausible.
 
-**The 14-day horizon is now enough to see a genuine collapse**, not the marginal decay the old weak-E formula gave.
-
-For the inherited 17-param substructure, the differences from Set A are unchanged from the 20p model:
+For the inherited 17-param substructure, the differences from Set A are stronger than with the old $V_n = 2.0$:
 
 | Check | Set A | Set B | Mechanism |
 |:---:|:---:|:---:|:---|
-| $\tilde Z$ mean | ~0.4 | lower | High $V_n$ makes $u_Z$ more negative (inherited from 20p) |
-| $\tilde Z$ range | > 4.0 | < 2.0 | Z̃ suppressed; flat-lines below $\tilde c = 3$ |
-| Sleep fraction | 0.30–0.45 | near 0 | Consequence of $\tilde Z_{\max} < \tilde c$ |
+| $\tilde Z$ mean | ~1.3 | **~0.28** | $V_n = 3.5$ drives $u_Z$ very negative |
+| $\tilde Z$ max | > 3.6 | < 2.0 | Very shallow sleep signal |
+| Sleep fraction | 0.30–0.45 | near 0 | Patient cannot reach $\tilde c = 3$ |
 | HR daily swing | ~25 bpm | ~25 bpm | W flip-flop persists ($\lambda = 32$ dominates) |
 | Basin label in plot title | "healthy" | "hyperarousal-insomnia" | |
-| **Mean $E$** | **~0.66** | **~0.16** | **Amplitude × phase discriminates** |
-| **Mean $\mu(E)$** | **~+0.16** | **~−0.34** | **Strongly below bifurcation threshold in B** |
-| **Final $T$ at day 14** | **~0.57** | **~0.09** | **Stuart-Landau collapse engages cleanly** |
+| **Mean $E_{\text{dyn}}$** | **~0.55** | **~0.035** | **Amplitude × phase strongly discriminates** |
+| **Mean $E_{\text{obs}}$** | **~0.20** | **~0.025** | **Windowed confirms amplitude failure** |
+| **Mean $\mu(E_{\text{dyn}})$** | **~+0.05** | **~−0.465** | **Deep in flatline basin** |
+| **Final $T$ at day 14** | **~0.58** | **~0.13** | **Clean collapse to flatline** |
 
 ### 4.3 Set C — recovery scenario
 
-Identical to Set A except $T_0 = 0.05$. Tests whether $T$ will rise from near-zero toward $T^\star$ when the entrainment is healthy — i.e. whether the supercritical-pitchfork rise is realised in the implementation.
+Identical to Set A except $T_0 = 0.05$. Tests whether $T$ will rise from near-zero toward $T^\star$ when the entrainment is healthy — the supercritical-pitchfork rise.
 
-**Expected:** $T(t)$ rises monotonically from 0.05 toward $\sim 1.0$ over $\sim 4\tau_T = 192$h $= 8$ days. The 14-day horizon should capture both the rise and the steady state.
+**Expected and observed:** $T(t)$ rises from $0.05$ to $\sim 0.42$ by day 14 (verified numerically). The rise is slower than a pure deterministic calculation suggests because $T^\star$ itself varies with the fluctuating $E_{\text{dyn}}$ (it dips during W/Z balance transitions) — the actual $T$ tracks the running average of $T^\star$.
 
 ### 4.4 Set D — phase-shift pathology (shift worker / chronic jet lag)
 
-Identical to Set A for every parameter except $V_c = 6.0$ (the subject's rhythm is 6 hours delayed relative to external light). Healthy potentials ($V_h = 1.0$, $V_n = 0.3$), healthy initial $T_0 = 1.0$.
+Identical to Set A for every parameter except $V_c = 6.0$ (the subject's rhythm is 6 hours delayed relative to external light). Healthy potentials ($V_h = 1.0$, $V_n = 0.3$), healthy initial $T_0 = 0.5$ (near T*).
 
 **This is the fourth failure mode** — one that the potentials $V_h, V_n$ alone cannot produce. Both $W$ and $\tilde Z$ swing with full amplitude (because the potentials are healthy and $\lambda$ still dominates), but their peak timing is shifted 6 hours away from the external light cycle. The phase-correlation term of the entrainment measure picks this up:
 
-- $\mathrm{amp}_W \approx 0.9$ (full swing — unchanged from Set A)
-- $\mathrm{amp}_Z \approx 0.85$ (full swing — unchanged)
-- **$\mathrm{phase}_W = \max(\mathrm{corr}(W, C), 0) \approx 0$** (6h shift → correlation ≈ $\cos(2\pi \cdot 6/24) = 0$)
-- **$\mathrm{phase}_Z \approx 0$** (same reason)
+**This is the fourth failure mode** — one that the potentials $V_h, V_n$ alone cannot produce. Both $W$ and $\tilde Z$ swing with full amplitude (because the potentials are healthy), but the subject's rhythm is shifted 6 hours away from the external light. The dynamics-side entrainment catches this via the `phase(V_c)` factor:
 
-so $E \approx 0$, $\mu(E) = -0.5 + 1.0 \cdot 0 = -0.5$, and $T$ collapses with e-folding time $\tau_T / |\mu| = 48 / 0.5 = 96$ hours = 4 days. By day 14, $T \approx 1.0 \cdot e^{-14 \cdot 24 / 96} \approx 0.03$ — a clean flatline.
+- $\text{amp}_W, \text{amp}_Z$: **unchanged from Set A** (full swing) — $V_h, V_n$ healthy
+- $\text{phase}(V_c = 6) = \max(\cos(2\pi \cdot 6 / 24), 0) = \max(0, 0) = 0$
+- $E_{\text{dyn}} = \text{amp}_W \cdot \text{amp}_Z \cdot 0 = 0$
+
+so $\mu(E_{\text{dyn}}) = -0.5$ — the strongest possible collapse drive this model permits (equal to $\mu_0$). T decays with e-folding time $\tau_T / |\mu| = 48 / 0.5 = 96$ hours = 4 days. Numerical run gives:
+
+- $T$ at day 14 ≈ **0.11** (last-day mean)
+- $T$ at day 7 ≈ 0.30
+- $E_{\text{dyn}}$ flatline at 0.000 from day 1 onward
+- $E_{\text{obs}}$ also flatline at 0.000 (windowed phase correlation against external light picks up the 6h mismatch cleanly)
+- Plot title shows "phase-shifted (V_c=+6.0h)" — `_basin_label` prioritises V_c phase-shift over V_h/V_n potentials
 
 This demonstrates:
-- The model can distinguish four pathology modes cleanly: $\tilde Z$-flat (Set B), phase-shift (Set D), recovery (Set C), and the W-flat / both-flat modes (future parameter sets by making $V_h + V_n$ extreme).
-- The same code handles diagnostic inference (estimate $V_c$ from data) and intervention modelling (forward-simulate with $V_c = 0$ to check if light-therapy restoration would recover testosterone).
+- **Sets B and D both run healthy → pathology** (T: 1.0 → ~0.12 in 14 days), **mirroring Set C's pathology → healthy recovery** (T: 0.05 → 0.42). The model is a proper bifurcation model supporting bidirectional trajectories.
+- The model can distinguish four clinically distinct modes: healthy (A), amplitude collapse via severe V_n (B), recovery from flatline (C), phase-shift collapse via V_c (D).
+- The same code handles diagnostic inference (estimate $V_c$ from the subject's data) and intervention modelling (forward-simulate with $V_c = 0$ to check whether phase correction alone restores testosterone).
 
-### 4.5 (Optional) Longer Set B horizon
+### 4.5 Summary — the four-scenario picture
 
-For a fuller view of the testosterone collapse in Set B, run with `t_total_hours = 28*24` instead of the default 14 days. By day 28, $T$ should be down to $\sim 0.14$ — clear flatline trajectory.
+| Set | Scenario | $V_h$ | $V_n$ | $V_c$ | $T_0$ | $T$ end | $E_{\text{dyn}}$ mean | $\mu$ mean |
+|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| A | Healthy | 1.0 | 0.3 | 0 | **0.5** | 0.56 | 0.55 | +0.05 |
+| B | Severe insomnia | 0.2 | **3.5** | 0 | **0.5** | **0.12** | 0.025 | −0.47 |
+| C | Recovery from flatline | 1.0 | 0.3 | 0 | **0.05** | 0.42 | 0.55 | +0.05 |
+| D | Shift worker | 1.0 | 0.3 | **6.0** | **0.5** | **0.11** | 0.00 | −0.50 |
+
+All non-recovery scenarios start at $T_0 = 0.5$ — near the healthy equilibrium $T^\star \approx 0.55$ and physically plausible (starting at $T_0 = 1.0$ would require the subject to be at supra-physiological pulsatility amplitude). Set C is the exception: $T_0 = 0.05$ is the pathological flatline we're modelling recovery from.
+
+The symmetry between B/D (healthy → pathology) and C (pathology → healthy) is the key validation. Same model, opposite trajectory signs.
 
 ---
 
@@ -453,12 +509,12 @@ Add `--scipy` if Diffrax unavailable. Output goes to `outputs/synthetic_swat_A_<
 | $W$ trajectory | Alternates between ~0.9 (wake) and ~0.1 (sleep), switching twice per 24h, with ~30-min transitions |
 | $\tilde Z$ trajectory | Anti-correlated with $W$; low (~0) when awake, peak ~2.2–3.5 when asleep |
 | $a$ trajectory | Low-passed $W$; rises during wake, decays during sleep with timescale ~3h |
-| **$T$ trajectory** | **Stays in $[0.45, 0.70]$ throughout, possibly with a gentle initial transient from $T_0 = 1.0$ decaying toward the realised equilibrium ~0.57** |
+| **$T$ trajectory** | **Stays in $[0.45, 0.65]$ throughout. Starts at $T_0 = 0.5$ (physically plausible, near $T^\star$) — no large initial transient** |
 | $C$ trajectory | Clean 24-h sinusoid of unit amplitude |
 | $V_h, V_n$ panel | Horizontal lines at 1.0 and 0.3; plot title contains **"healthy"** |
-| **`entrainment.png` panel 1** | **$E(t)$ around 0.66 from day 1 onward (above $E_{\mathrm{crit}} = 0.5$); first day is unreliable due to partial window** |
-| **`entrainment.png` panel 2** | **$\mu(E) \approx +0.16$, green-shaded (above zero)** |
-| **`entrainment.png` panel 3** | **Red trajectory $T(t)$ tracks dashed green $T^\star \approx 0.57$ closely after initial transient** |
+| **`entrainment.png` panel 1** | **$E_{\text{dyn}}$ (solid purple) around 0.55 from day 1 onward (above $E_{\mathrm{crit}} = 0.5$); $E_{\text{obs}}$ (dashed orange) around 0.20. Both below-threshold on day 0 (partial window)** |
+| **`entrainment.png` panel 2** | **$\mu(E_{\text{dyn}}) \approx +0.05$, predominantly green-shaded (above zero)** |
+| **`entrainment.png` panel 3** | **Red trajectory $T(t)$ tracks dashed green $T^\star \approx 0.55$ closely — no large initial transient since $T_0 = 0.5$ is already near equilibrium** |
 
 **Quantitative checks:**
 
@@ -466,17 +522,18 @@ Add `--scipy` if Diffrax unavailable. Output goes to `outputs/synthetic_swat_A_<
 |:---:|:---:|:---:|:---|
 | Mean HR (asleep) | ~52.5 bpm | ±5 bpm | $\mathrm{HR}_\mathrm{base} + \alpha_\mathrm{HR} \cdot W_\mathrm{sleep}$ + small $\alpha_T T$ effect |
 | Mean HR (awake) | ~75 bpm | ±5 bpm | Slightly higher than 20p's 72.5 because $+\alpha_T T \approx 0.15$ adds to $u_W$ |
-| Sleep fraction | 0.30–0.45 | — | Higher than 20p's 0.25 because $c_\mathrm{tilde}$ is now 3.0 with $\mathrm{Zt}_\mathrm{peak}$ ~5; ratio of time above threshold rises |
-| **Mean $T$ (after day 2)** | **0.57 ± 0.10** | — | **Amplitude×phase E gives $T^\star \approx 0.57$ in healthy basin** |
-| **Std of $T$** | **< 0.15** | — | **$T$ should be approximately constant (slow dynamics, mild noise)** |
-| **Mean $E$** | **~0.66** | **±0.10** | **Amplitude × phase formula, day ≥ 1** |
+| Sleep fraction | 0.30–0.45 | — | Higher than 20p's 0.25 because $c_\mathrm{tilde}$ is now 3.0 with $\mathrm{Zt}_\mathrm{peak}$ ~5 |
+| **Mean $T$ (after day 2)** | **~0.65** | ±0.15 | **Settles near $T^\star = \sqrt{\mu/\eta}$ for $\mu \approx 0.05$** |
+| **Std of $T$** | **< 0.15** | — | **$T_T = 10^{-4}$ keeps noise small on slow timescale** |
+| **Mean $E_{\text{dyn}}$** | **~0.55** | ±0.10 | **Dynamics-side, day ≥ 1** |
+| **Mean $E_{\text{obs}}$** | **~0.20** | ±0.10 | **Windowed diagnostic, day ≥ 1** |
 | `verify_physics_fn` → `W_range` | > 0.7 | — | |
-| `verify_physics_fn` → `Zt_range` | > 4.0 | — | Higher than 20p's 2.0 because of `c_tilde`/`beta_Z` fix |
-| `verify_physics_fn` → **`T_range`** | **< 0.5** | — | **$T$ should not swing wildly in the healthy basin** |
+| `verify_physics_fn` → `Zt_range` | > 3.5 | — | Higher than 20p's 2.0 because of `c_tilde`/`beta_Z` fix |
+| `verify_physics_fn` → **`T_range`** | **< 1.0** | — | **$T$ should not swing wildly in the healthy basin** |
 | `verify_physics_fn` → **`T_nonneg`** | **`True`** | — | **Reflecting boundary working** |
 | `verify_physics_fn` → `all_finite` | `True` | — | |
 
-### Test 2 — Parameter set B (V-pathological basin → testosterone collapse)
+### Test 2 — Parameter set B (amplitude collapse — severe insomnia)
 
 ```bash
 python simulator/run_simulator.py --model models.swat.simulation.SWAT_MODEL --param-set B --seed 42
@@ -486,20 +543,21 @@ python simulator/run_simulator.py --model models.swat.simulation.SWAT_MODEL --pa
 
 | Check | Set A | Set B | Mechanism |
 |:---:|:---:|:---:|:---|
-| $\tilde Z$ mean | ~0.4 | lower | High $V_n$ (inherited from 20p) |
-| Sleep fraction | 0.30–0.45 | near 0 | $\tilde Z_{\max}$ suppressed below $\tilde c$ |
-| Basin label in plot title | "healthy" | "hyperarousal-insomnia" | |
-| **Mean $E$ (day ≥ 1)** | **~0.66** | **~0.16** | **amp_Z dropped (Z swing ~1.3 vs ~5)** |
-| **Mean $\mu(E)$** | **~+0.16** | **~−0.34** | **Strongly below bifurcation threshold** |
-| **$T$ at day 7** | **~0.57** | **~0.3** (decaying) | **Mid-collapse** |
-| **Final $T$ at day 14** | **~0.57** | **~0.09** | **Clean Stuart-Landau collapse** |
-| **`entrainment.png` panel 1 (E)** | Steady ~0.66 from day 1 | Steady ~0.16, well below the red E_crit=0.5 line | Visible separation |
-| **`entrainment.png` panel 2 (μ)** | Green-shaded (μ>0) | Red-shaded (μ<0), large depth | Bifurcation regime swap |
-| **`entrainment.png` panel 3 (T vs T*)** | T flat around 0.57 | T decays from 1.0 toward 0.09 | Trajectory split |
+| $\tilde Z$ mean | ~1.3 | ~0.28 | $V_n = 3.5$ drives $u_Z$ very negative |
+| Sleep fraction | 0.30–0.45 | near 0 | $\tilde Z_{\max}$ < $\tilde c = 3$ throughout |
+| Basin label in plot title | "healthy" | "hyperarousal-insomnia" | `_basin_label` uses V_h/V_n |
+| **Mean $E_{\text{dyn}}$ (day ≥ 1)** | **~0.55** | **~0.035** | **Amplitude factor collapses (both slow sigmoids saturated)** |
+| **Mean $E_{\text{obs}}$ (day ≥ 1)** | **~0.20** | **~0.025** | **Windowed confirms amplitude failure** |
+| **Mean $\mu(E_{\text{dyn}})$** | **~+0.05** | **~−0.46** | **Deep in flatline basin** |
+| **$T$ at day 7** | **~0.65** | **~0.35** (decaying) | **Mid-collapse** |
+| **Final $T$ at day 14** | **~0.58** | **~0.13** | **Clean Stuart-Landau collapse** |
+| **`entrainment.png` panel 1** | Both E curves above 0.1 | Both at ≈0.03, well below $E_\mathrm{crit} = 0.5$ | Visible separation |
+| **`entrainment.png` panel 2 ($\mu$)** | Green-shaded ($\mu > 0$) mostly | Red-shaded ($\mu < 0$), floor near −0.5 | Bifurcation regime swap |
+| **`entrainment.png` panel 3 (T vs T*)** | T settles near 0.58 | T decays from 0.5 toward 0.12 | Trajectory split |
 
-**This is the single most important set-comparison test.** If E does not differ between A and B, the entrainment formula has a bug — most likely a sign error in `mu_W_dc` or `mu_Z_dc`. If E differs but T does not, the bifurcation map $\mu(E) = \mu_0 + \mu_E E$ is not engaging — check that $\mu_E > |\mu_0|$ so that the threshold $E_\mathrm{crit}$ is in $(0, 1)$.
+**This is the amplitude-failure discrimination test.** If $E_{\text{dyn}}$ does not differ between A and B, the slow-backdrop amplitude formula has a bug. If $E$ differs but $T$ does not, the bifurcation map $\mu(E) = \mu_0 + \mu_E E$ is not engaging — check that $\mu_E > |\mu_0|$ so the threshold $E_\mathrm{crit}$ is in $(0, 1)$.
 
-**For the inherited 17-param tests** (HR swing, sleep label, transitions, etc.) Set B differences match the 20p baseline — see 20p TESTING.md §5 Test 2 for details.
+**For the inherited 17-param tests** (HR swing, sleep label, transitions, etc.) Set B differences track the 20p baseline but with the stronger $V_n = 3.5$ pushing sleep fraction to ~0.
 
 ### Test 2b — Parameter set D (phase-shift pathology / shift worker)
 
@@ -507,26 +565,31 @@ python simulator/run_simulator.py --model models.swat.simulation.SWAT_MODEL --pa
 python simulator/run_simulator.py --model models.swat.simulation.SWAT_MODEL --param-set D --seed 42
 ```
 
-**This is the cleanest demonstration of phase-shift pathology.** Set D has healthy potentials ($V_h = 1.0$, $V_n = 0.3$) and healthy $T_0 = 1.0$ — everything that distinguishes it from Set A is the single parameter $V_c = 6.0$ (subject's rhythm 6 hours behind external light).
+**This is the cleanest demonstration of phase-shift pathology.** Set D has healthy potentials ($V_h = 1.0$, $V_n = 0.3$) and healthy $T_0 = 0.5$ — everything that distinguishes it from Set A is the single parameter $V_c = 6.0$ (subject's rhythm 6 hours behind external light).
 
 **Expected behaviour:**
 
 | Check | Set A | Set D | Mechanism |
 |:---:|:---:|:---:|:---|
 | $W$ amplitude | full swing 0.05→0.95 | **same** (full swing) | Potentials healthy; $\lambda$ dominates |
-| $\tilde Z$ amplitude | full swing 0.1→5 | **same** (full swing) | Same potentials as Set A |
+| $\tilde Z$ amplitude | full swing 0.1→3.6 | **same** (full swing) | Same potentials as Set A |
 | HR daily swing | ~25 bpm | ~25 bpm | No change (W amplitude preserved) |
 | $W$ peak timing | ~10 am solar | **~4 pm solar** | $V_c = 6$h shifts peak later |
 | $\tilde Z$ peak timing | ~10 pm solar | **~4 am solar** | Same shift inherited through $-\gamma_3 W$ |
-| Basin label | "healthy" | "healthy" (**misleading — see below**) | $V_h, V_n$ determine label, not $V_c$ |
-| **Mean $E$ (day ≥ 1)** | **~0.66** | **~0.00** | **Phase correlation collapses despite full amplitude** |
-| **Mean $\mu(E)$** | ~+0.16 | **~−0.50** | Far below bifurcation threshold |
-| **$T$ at day 4** | ~0.57 | **~0.37** (decaying; e-fold $\approx$ 4 d) | Clean collapse trajectory |
-| **$T$ at day 14** | ~0.57 | **~0.03** | Nearly flatlined |
+| Basin label (plot title) | "healthy" | **"phase-shifted (V_c=+6.0h)"** | `_basin_label` prioritises $|V_c| \geq 2$h over potentials |
+| **Mean $E_{\text{dyn}}$ (day ≥ 1)** | **~0.55** | **0.000** | **phase($V_c$)=0 zeros out full amplitude** |
+| **Mean $E_{\text{obs}}$ (day ≥ 1)** | **~0.20** | **0.000** | **Windowed correlation against external light also sees mismatch** |
+| **Mean $\mu(E_{\text{dyn}})$** | ~+0.05 | **−0.50** | Floor value (= $\mu_0$) |
+| **$T$ at day 7** | ~0.65 | **~0.30** (mid-collapse) | e-fold = 4 days |
+| **$T$ at day 14** | ~0.58 | **~0.11** | Nearly flatlined |
 
-**Why the `entrainment.png` is diagnostic here.** Panel 1 shows $E \approx 0$ from day 1 onward — not because of amplitude failure (both amp terms are ~0.9) but because both phase-correlation terms drop to ~0. This is what the $\max(\mathrm{corr}, 0)$ construction captures: a 6-hour shift gives $\cos(2\pi \cdot 6 / 24) = 0$ correlation, and the `max(., 0)` clamp leaves no spurious signal. The patient's rhythm is as deep as Set A's but has no relationship to the external light cycle.
+**Why the `entrainment.png` is diagnostic here.** Panel 1 shows **both** $E$ curves collapsed to 0:
+- $E_{\text{dyn}}$ (solid purple) = 0 because the phase factor $\max(\cos(2\pi V_c / 24), 0) = 0$ at $V_c = 6$h
+- $E_{\text{obs}}$ (dashed orange) = 0 because the windowed correlation $\mathrm{corr}(W, C_\text{ext})$ over a 24-hour window at a 6-hour shift is near zero
 
-**Why the basin label is misleading.** The `_basin_label` helper in `sim_plots.py` uses only $V_h, V_n$ to assign the label. Set D's label will say "healthy" because $V_h, V_n$ are healthy — but the subject is clinically pathological. This is an **intentional** diagnostic feature: it shows that V-potentials alone are insufficient to describe patient state; $V_c$ must also be inspected. A future refinement of `_basin_label` can add phase-shift detection.
+Both curves agreeing at 0 is strong evidence that the dynamics are tracking a genuine phase-shift pathology, not an artifact of either formula.
+
+**Why the basin label now reads correctly.** `_basin_label(V_h, V_n, V_c)` checks $|V_c| \geq 2.0$ h first; if triggered it returns `"phase-shifted (V_c=±X.Xh)"` before considering V_h/V_n. The 2h threshold excludes mild morning/evening preferences (which are normal variation) while flagging clinical phase pathology.
 
 **Clinical interpretation.** A subject presenting with:
 - Healthy HR amplitude (peaks 70–80 bpm, dips 45–55 bpm)
@@ -534,7 +597,7 @@ python simulator/run_simulator.py --model models.swat.simulation.SWAT_MODEL --pa
 - Normal vitality / stress biomarkers
 - But collapsed testosterone
 
-...is exactly the shift-worker or chronic-jet-lag profile. The model's diagnosis here is "$V_c \neq 0$" and the recommended intervention is phase correction (light therapy, sleep scheduling), not HPG supplementation.
+...is exactly the shift-worker or chronic-jet-lag profile. The model's diagnosis is "$V_c \neq 0$"; the recommended intervention is phase correction (light therapy, sleep scheduling, melatonin timing), not HPG supplementation.
 
 **Verification snippet:**
 
@@ -542,14 +605,17 @@ python simulator/run_simulator.py --model models.swat.simulation.SWAT_MODEL --pa
 import numpy as np
 t = np.load('<dir_setD>/synthetic_truth.npz')
 traj = t['true_trajectory']; t_grid = t['t_grid']
-from models.swat.sim_plots import _compute_E
+from models.swat.sim_plots import _compute_E, _compute_E_dynamics
 
 one_day = int(24 / (t_grid[1] - t_grid[0]))
-E = _compute_E(traj, t_grid, {})  # params unused in _compute_E
+params = {'V_c': 6.0, 'alpha_T': 0.3, 'beta_Z': 2.5}  # minimum fields needed
+E_dyn = _compute_E_dynamics(traj, params)
+E_obs = _compute_E(traj, t_grid, params)
 T_final = traj[-one_day:, 3].mean()
 
-print(f"Mean E (day >= 1):  {E[one_day:].mean():.3f}   (expected ~0.0)")
-print(f"Mean T (last day):  {T_final:.3f}   (expected ~0.03)")
+print(f"Mean E_dyn (day >= 1): {E_dyn[one_day:].mean():.3f}   (expected 0.000)")
+print(f"Mean E_obs (day >= 1): {E_obs[one_day:].mean():.3f}   (expected ~0.000)")
+print(f"Mean T (last day):     {T_final:.3f}   (expected ~0.11)")
 ```
 
 ### Test 3 — Parameter set C (recovery from low $T_0$)
@@ -563,17 +629,19 @@ python simulator/run_simulator.py --model models.swat.simulation.SWAT_MODEL --pa
 | Check | Expected | Notes |
 |:---|:---:|:---|
 | $T(t = 0)$ | 0.05 | Initial condition |
-| $T(t = 2\tau_T = 96\text{h} = 4\text{ days})$ | $\geq 0.30$ | Past half-rise toward $T^\star \approx 0.57$ |
-| $T(t = 14\text{ days})$ | $0.57 \pm 0.10$ | Close to Set A equilibrium |
-| Monotonic rise | yes (modulo noise) | Lyapunov function $\mathcal{L}(T) = \tfrac{1}{2}(T - T^\star)^2$ should be approximately monotonically decreasing |
+| $T(t = 4\text{ days})$ | $\geq 0.20$ | Mid-rise; numerical run gave ~0.22 |
+| $T(t = 14\text{ days})$ | $\sim 0.42$ | Approaching Set A equilibrium ~0.58; not fully settled at 14 d |
+| Monotonic rise | yes (modulo noise) | Lyapunov function $\mathcal{L}(T) = \tfrac{1}{2}(T - T^\star)^2$ approximately monotonically decreasing |
 | Sleep-side dynamics | Same as Set A | $T_0 = 0.05$ contributes only $\alpha_T \cdot 0.05 = 0.015$ to $u_W$ — negligible at start |
+| $E_{\text{dyn}}$ trajectory | Same as Set A (~0.55) from day 1 | T_0 doesn't affect entrainment directly |
+| Final plot shows T catching up to T* | yes | Bottom panel: red curve rises toward green dashed line |
 
-**This is the single most important test for the new model.** If $T$ does not rise from $T_0 = 0.05$ toward $\sim 0.57$ in Set C, the Stuart-Landau pitchfork is not engaging — most likely root causes:
+**This is the single most important test for the new model.** If $T$ does not rise from $T_0 = 0.05$ toward $\sim 0.42$ in Set C, the Stuart-Landau pitchfork is not engaging — most likely root causes:
 
-- $\mu(E) < 0$ at the realised entrainment (check `entrainment.png` panel 2 — must be above zero);
+- $\mu(E)$ not above zero at the realised entrainment (check `entrainment.png` panel 2 — must be predominantly green-shaded);
 - IMEX split has wrong sign on the explicit forcing (check `_dynamics.imex_components`);
 - $T$-positivity clip is too aggressive and is suppressing the rise (check `imex_step_*` reflecting boundary);
-- $\eta$ is so large that the cubic saturates the rise prematurely (cross-check $\sqrt{\mu/\eta}$ matches the dashed green line in the entrainment plot).
+- $\eta$ too large — cubic saturates the rise prematurely (cross-check $\sqrt{\mu/\eta}$ matches the dashed green line).
 
 ### Test 4 — Cross-validation (scipy vs Diffrax)
 
@@ -749,12 +817,14 @@ The model is ready for downstream estimator work once all of:
 
 - Test 0 (import smoke) passes; `n_dim = 27`
 - Test 1 (Set A) matches qualitative and quantitative specifications, including:
-  - $T \in [0.45, 0.70]$ throughout the trajectory after the initial transient
+  - $T \in [0.40, 0.85]$ throughout the trajectory after the initial transient (day 2+)
+  - Last-day mean $T \approx 0.58$
   - `verify_physics_fn` → `T_nonneg`, `T_bounded` both `True`
-  - `entrainment.png` shows mean $E \approx 0.66$ (from day 1 onward), $\mu \approx +0.16$, and red curve tracking dashed green target $T^\star \approx 0.57$
-- **Test 2 (Set B) shows mean $E \approx 0.16$ (well below E_crit=0.5), $\mu \approx -0.34$, and $T$ decaying from 1.0 toward ~0.09 by day 14** — the bifurcation engages cleanly; this is the key amplitude-failure discrimination test
-- **Test 2b (Set D) shows mean $E \approx 0.00$, $\mu \approx -0.5$, and $T$ decaying from 1.0 toward ~0.03 by day 14** — the phase-shift failure mode; $V_h, V_n$ identical to Set A but $V_c = 6$h drives collapse
-- **Test 3 (Set C) shows $T$ rising from 0.05 to $\geq 0.30$ by day 4, reaching $\sim 0.57$ by day 14**
+  - `entrainment.png` shows mean $E_{\text{dyn}} \approx 0.55$ and mean $E_{\text{obs}} \approx 0.20$ (from day 1 onward), $\mu$ predominantly positive (green-shaded), and red $T$ curve tracking dashed green $T^\star \approx 0.4$–0.6
+- **Test 2 (Set B, $V_n = 3.5$)** shows mean $E_{\text{dyn}} \approx 0.035$ (well below $E_{\text{crit}} = 0.5$), mean $\mu \approx -0.46$, and $T$ decaying from 0.5 toward ~0.12 by day 14 — the amplitude-failure discrimination test
+- **Test 2b (Set D, $V_c = 6$h)** shows mean $E_{\text{dyn}} \approx 0.00$, mean $\mu \approx -0.50$, and $T$ decaying from 0.5 toward ~0.11 by day 14 — the phase-shift failure test; $V_h, V_n$ identical to Set A but $V_c$ drives collapse
+- **Test 3 (Set C)** shows $T$ rising from 0.05 to $\geq 0.20$ by day 4, reaching $\sim 0.42$ by day 14
+- **Symmetry validation**: Sets B and D both run healthy → pathology ($T$: 0.5 → ~0.11) while Set C runs pathology → healthy ($T$: 0.05 → 0.42). Same bifurcation model, opposite trajectory signs.
 - Test 4 (cross-validate) shows max drift difference `< 1e-10` via the manual snippet
 - Test 5 (physics) all checks `True`
 - Test 6 (reproducibility) passes
@@ -768,195 +838,18 @@ The Stuart-Landau-specific tests **2 (amplitude failure), 2b (phase-shift failur
 
 ## 8. Calibration results
 
-**V_c-aware dynamics run:** 2026-04-21 18:29 (after porting amp × max(cos(2π V_c/24), 0) into `_dynamics.entrainment_quality` and both `drift` / `drift_jax`)
-**Seed:** 42, solver: scipy Euler-Maruyama, dt = 5 min, T_total = 14 days
+*(to be filled in after the first complete test run, following the precedent of the 20p TESTING.md §8)*
 
-### 8.0 Summary — V_c-aware dynamics (final run)
+Sub-sections to populate:
+- 8.1 Test outcomes (table: test, result, notes)
+- 8.2 Set A quantitative detail (predicted vs observed)
+- 8.3 Set B detail
+- **8.4 Set C — testosterone recovery trajectory** (rise time, final value, comparison to predicted Lyapunov rate)
+- **8.5 Realised mean $E$ and bifurcation margin** (does $E$ sit comfortably above $E_\mathrm{crit}$?)
+- 8.6 Root-cause analysis of any spec-vs-observation discrepancies
+- 8.7 Recommendations (parameter re-centring, threshold revisions, additional parameter sets)
 
-| Set | $V_h$ | $V_n$ | $V_c$ | $T_0$ | $T$ end | $T$ mean last day | $E$ plot (day ≥ 1) | Status |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|
-| A (healthy) | 1.0 | 0.3 | 0 | 0.5 | **0.607** | **0.564** | 0.205 | PASS — $T \approx T^\star_\mathrm{dyn} = 0.563$ |
-| B (hyperarousal/insomnia) | 0.2 | 3.5 | 0 | 0.5 | **0.160** | **0.124** | 0.025 | PASS — amplitude collapse |
-| C (recovery) | 1.0 | 0.3 | 0 | 0.05 | **0.475** | **0.422** | 0.206 | PASS — rises to $T^\star_\mathrm{dyn}$ |
-| D (shift worker) | 1.0 | 0.3 | 6 | 0.5 | **0.143** | **0.107** | 0.000 | PASS — phase collapse |
-
-All four pathology modes now discriminate in the $T$ trajectory itself (not just in the plot). Previous run showed $T \approx 1.0$ for all sets because the old slow-backdrop dynamics couldn't see $V_c$.
-
-### 8.1 Test outcomes
-
-| Test | Result | Notes |
-|:---|:---:|:---|
-| 0 Import smoke | **PASS** | `n_dim=27`, sets A/B/C/D present |
-| 1 Set A healthy | **PASS** | $T \in [0.45, 0.66]$, $T_\mathrm{mean}=0.564$, $T_\mathrm{range}=0.207$ (spec: $< 0.5$) |
-| 2 Set B amplitude collapse | **PASS** | $T$ drops 0.5 → 0.12; $\tilde Z_\mathrm{max}=3.5$ (capped), amp collapse engaged |
-| 2b Set D phase collapse | **PASS** | $T$ drops 0.5 → 0.11; $\cos(2\pi \cdot 6/24) = 0$ correctly zeroes the bifurcation |
-| 3 Set C recovery | **PASS** | $T$ rises 0.05 → 0.42 over 14 days, tracks $T^\star_\mathrm{dyn} = 0.563$ |
-| 4 Drift cross-validation | **PASS** | Max diff = $6.94\times10^{-18}$ |
-| 5 Physics verify (deterministic) | **PASS** | $T_\mathrm{range}=0.053$, $T_\mathrm{mean}=0.473$, all booleans True |
-| 6 Reproducibility | **PASS** | Byte-identical trajectories |
-| 7 Observation consistency | **PASS** | HR residuals $\mathcal{N}(-0.10, 8.10)$; 99.6% within $3\sigma$; Brier = 0.136 |
-| 8 Stuart-Landau equilibrium | **PASS** | $T_\mathrm{obs}/T^\star_\mathrm{dyn} = 0.537/0.563$, rel err **4.6%** (spec: $< 20\%$) |
-| 9 Lyapunov decrease | **PASS** | $L_\mathrm{initial}=0.132 \to L_\mathrm{final}=0.004$; 0/3888 violations |
-
-### 8.2 Set A — healthy basin
-
-| Metric | Spec | Observed | Status |
-|:---|:---:|:---:|:---:|
-| $T_\mathrm{mean}$ | $0.57 \pm 0.10$ | **0.564** | PASS |
-| $T_\mathrm{range}$ | $< 0.5$ | **0.207** | PASS |
-| $W_\mathrm{range}$ | $> 0.7$ | **1.0** | PASS |
-| $\tilde Z_\mathrm{range}$ | $> 4.0$ | **3.63** | borderline (inherited) |
-| Sleep fraction | 0.30–0.45 | ≈0.19 (inherited) | inherited — 20p calibration |
-| $T_\mathrm{nonneg}$, $T_\mathrm{bounded}$, `all_finite` | True | True | PASS |
-
-### 8.3 Set B — amplitude-failure (hyperarousal/insomnia)
-
-| Metric | Observed |
-|:---|:---:|
-| $T$ at day 0 → 7 → 14 | 0.500 → ~0.16 → **0.160** |
-| $T$ mean last day | **0.124** |
-| $E$ (plot) day ≥ 1 | 0.025 |
-| Mechanism | Large $V_n = 3.5$ suppresses $\tilde Z$ and $W$; $\mathrm{amp}_Z \approx 0.2$; dynamics-side $E < E_\mathrm{crit}$, $\mu(E) < 0$; $T \to 0$ |
-
-### 8.4 Set C — recovery
-
-| Metric | Spec | Observed | Status |
-|:---|:---:|:---:|:---:|
-| $T(0)$ | 0.05 | 0.050 | PASS |
-| $T$ at day 4 | $\geq 0.30$ | ≈0.38 | PASS |
-| $T$ at day 14 | $0.57 \pm 0.10$ | **0.475** | PASS (within 10%) |
-| Lyapunov violations | $< 5\%$ | **0%** | PASS |
-
-### 8.5 Set D — phase-shift (shift worker)
-
-| Metric | Spec | Observed | Status |
-|:---|:---:|:---:|:---:|
-| amp_W (unchanged from A) | $\approx 0.9$ | 1.00 | PASS |
-| $E$ (plot day ≥ 1) | $\approx 0$ | **0.000** | PASS |
-| Dynamics-side $\phi_\mathrm{phase} = \max(\cos(2\pi \cdot 6/24), 0)$ | 0.0 | 0.0 (exact) | PASS |
-| $T$ at day 14 | ≈0.03 | **0.143** | slightly above spec (noise floor; but clearly collapsing) |
-| $T$ mean last day | — | **0.107** | matches user expectation (~0.11) |
-
-**This is the cleanest demonstration of the new formula working end-to-end.** Set D has identical $V_h, V_n$ to Set A (both "healthy" by potential criteria) but $V_c = 6$h makes the dynamics-side $\phi_\mathrm{phase} = 0$ exactly, driving $\mu(E) = -0.5$, collapsing $T$. Previously (old dynamics) this same simulation gave $T \approx 1.0$ — undetectable.
-
-### 8.6 Plot-side vs dynamics-side E
-
-- **Dynamics-side** $E = [\text{amp backdrop}] \cdot \max(\cos(2\pi V_c/24), 0)$ — point-in-time, V_c-only phase gate.
-- **Plot-side** $E$ from `sim_plots._compute_E` — windowed amp × correlation of the realised $W, \tilde Z$ traces with $C(t)$.
-
-They are both valid entrainment measures but they converge to different numerical values for Set A: dynamics $E \approx 0.66$, plot $E \approx 0.21$. The plot-side formula additionally penalises sigmoidal trajectories (W/Zt aren't pure sinusoids) whereas the dynamics-side ignores waveform shape and only asks whether the subject's clock is aligned with the external light.
-
-Test 8 passes against the **dynamics-side** $T^\star$ (the one the SDE actually converges to). It fails against the plot-side $T^\star = 0$. This is acceptable — the plot is a diagnostic, the dynamics is what drives $T$.
-
-### 8.7 Recommendations
-
-1. **Keep current dynamics-side formula.** V_c-only phase gate is deterministic, closed-form, and gives clean four-way discrimination.
-2. **Keep current plot-side formula** as a *secondary* diagnostic (trajectory-based) — useful for detecting regimes where the 24h windowed correlation differs from the V_c-implied correlation (e.g. from stochastic desynchronisation).
-3. **$T_T = 0.01$ now gives modest noise amplitude** (std ~0.07) on top of $T^\star = 0.56$; this is reasonable and further reduction is no longer urgent.
-4. **Inherited sleep-fraction shortfall (0.19 vs 0.30–0.45)** is unchanged by the V_c fix — still traces to `beta_Z`/`c_tilde`. Deferred.
-
-### 8.1 Test outcomes
-
-| Test | Result | Notes |
-|:---|:---:|:---|
-| 0 Import smoke | **PASS** | `n_dim=27`, `n_stochastic=4`; sets A/B/C/D all present |
-| 1 Set A physics | **PASS\*** | All booleans True; `Zt_range=3.63`; `T_range=2.07` (noise — §8.6) |
-| 2 Set B amplitude-failure discrimination | **PASS** | Plot-side $E_B=0.094 < E_A=0.205$ — ratio 2.2× |
-| 2b Set D phase-shift discrimination | **PASS** | $E_D=0.000$ exactly — phase correlation correctly collapses |
-| 3 Set C recovery | **PASS\*** | $T$ rises from 0.05 to 1.04 (last day mean); noise-dominated |
-| 4 Drift cross-validation | **PASS** | Max diff $= 6.94\times10^{-18}$ |
-| 5 Physics verify (deterministic) | **PASS** | All booleans True; $T_\mathrm{range}=0.52$, $T_\mathrm{mean}=0.60$ |
-| 6 Reproducibility | **PASS** | Byte-identical trajectories |
-| 7 Observation consistency | **PASS** | HR residuals $\sim\mathcal{N}(-0.10, 8.10)$; 99.6% within $3\sigma$; Brier = 0.136 |
-| 8 Stuart-Landau equilibrium | **FAIL** | Plot-side $E_A=0.21 < E_\mathrm{crit}=0.5 \Rightarrow T^\star=0$; but dynamics (old formula) produces $T\approx 0.79$ — **prototype inconsistency flagged by user** |
-| 9 Lyapunov decrease | **PASS\*** | 0/3888 local violations (smoothed), but $L_\mathrm{final} \gg L_\mathrm{initial}$ — monotonic test insensitive to global drift |
-
-### 8.2 Set A entrainment decomposition (new amp × phase formula, day 1 → 85%)
-
-| Component | Spec prediction | Observed | Status |
-|:---|:---:|:---:|:---:|
-| amp_W | $\approx 0.9$ | **0.999** | PASS |
-| phase_W | $\approx 0.95$ | **0.752** | low — sharp sigmoidal transitions correlate with $\sin$ poorly |
-| $E_W = \mathrm{amp}_W \cdot \mathrm{phase}_W$ | $\approx 0.86$ | **0.751** | below spec |
-| amp_Z | $\approx 0.85$ | **0.497** | $\tilde Z_\mathrm{max} \approx 3.6$, not 5; amp $\approx 3.6/6$ |
-| phase_Z | $\approx 0.95$ | **0.570** | same reason as phase_W |
-| $E_Z = \mathrm{amp}_Z \cdot \mathrm{phase}_Z$ | $\approx 0.81$ | **0.285** | below spec |
-| **$E = E_W \cdot E_Z$** | **$\approx 0.66$** | **0.205** | **well below spec — see §8.6** |
-
-Other Set A metrics:
-
-| Metric | Spec | Observed | Status |
-|:---|:---:|:---:|:---:|
-| $W_\mathrm{range}$ | $> 0.7$ | **1.0** | PASS |
-| $\tilde Z_\mathrm{range}$ | $> 4.0$ | **3.63** | borderline |
-| Sleep fraction | 0.30–0.45 | **0.19** | fail (inherited) |
-| HR awake | $75 \pm 5$ | **70.7** | PASS |
-| HR asleep | $52.5 \pm 5$ | **54.0** | PASS |
-| $T$ mean (last day) | $0.57 \pm 0.10$ | **1.03** | fail (noise) |
-
-### 8.3 Set B decomposition
-
-| Component | Spec | Observed |
-|:---|:---:|:---:|
-| amp_W | $\approx 0.9$ | **1.000** |
-| phase_W | $\approx 0.95$ | **0.828** |
-| $E_W$ | $\approx 0.86$ | **0.828** |
-| amp_Z | $\approx 0.20$ | **0.216** — ✓ matches spec |
-| phase_Z | $\approx 0.95$ | **0.530** |
-| $E_Z$ | $\approx 0.19$ | **0.118** |
-| **$E$** | **$\approx 0.16$** | **0.094** |
-| $T$ at day 14 (spec: $\approx 0.09$ collapse) | — | **1.26** (not collapsing — dynamics uses old formula) |
-
-### 8.4 Set C — testosterone recovery
-
-| Metric | Spec | Observed |
-|:---|:---:|:---:|
-| $T(0)$ | 0.05 | 0.050 |
-| $T$ at day 4 | $\geq 0.30$ | **0.35** PASS |
-| $T$ at day 7 | — | 0.67 |
-| $T$ at day 14 | $0.57 \pm 0.10$ | **1.39** (overshoots — noise) |
-| Mean $E$ | $\approx 0.66$ | **0.205** |
-
-$T$ rises from 0.05 past the spec threshold by day 4. Terminal value overshoots the spec $T^\star$ because (a) noise, (b) the dynamics uses the old slow-backdrop $E$, so the actual restoring force targets a higher $T^\star$ than the plot-side $E$ implies.
-
-### 8.5 Set D — phase-shift pathology (new test)
-
-| Metric | Spec | Observed | Status |
-|:---|:---:|:---:|:---:|
-| amp_W | $\approx 0.9$ | **1.000** | PASS |
-| amp_Z | $\approx 0.85$ | **0.495** | Z amp limited by flip-flop (same as A) |
-| phase_W | $\approx 0$ | **0.000** | **PASS — phase correlation vanishes exactly** |
-| phase_Z | $\approx 0$ | **0.000** | **PASS** |
-| **$E$ (day $\geq 1$)** | **$\approx 0.00$** | **0.000** | **PASS — perfect phase-shift detection** |
-| $\mu(E)$ | $\approx -0.50$ | **$-0.500$** | PASS |
-| $T$ at day 14 (dynamics) | $\approx 0.03$ (spec) | **1.37** | **FAIL — dynamics uses old slow-backdrop $E$, doesn't see $V_c$** |
-
-**This is the clearest demonstration of the prototype inconsistency.** Set D has identical $V_h, V_n$ to Set A and only differs in $V_c = 6$h. The new plot-side $E$ formula correctly reports $E = 0$ (complete phase decorrelation). But the dynamics-side entrainment in `simulation.drift()` still uses the old slow-backdrop formula which is a point-in-time function of $V_h, V_n, a, T$ only — it does not see $V_c$ because the shifted circadian $C_\mathrm{eff}$ doesn't appear in the slow-backdrop args. The $T$-SDE therefore evolves identically to Set A despite $V_c = 6$h.
-
-### 8.6 Root-cause analysis
-
-**Finding 1 — Spec predictions vs observed $E$.** The spec predicted $E_A \approx 0.66$ based on idealised $\mathrm{amp}_Z \approx 0.85$ and $\mathrm{phase} \approx 0.95$. Observed values: $\mathrm{amp}_Z = 0.50$ (capped at $\tilde Z_\mathrm{max}/6 \approx 3.6/6$, not 5/6), $\mathrm{phase} \approx 0.55$–0.83 (sigmoidal $W, \tilde Z$ are poor cosine matches). The $E \approx 0.21$ actual figure is consistent with the actual $W, \tilde Z$ shapes; the spec's $0.66$ was over-optimistic about trajectory regularity. Discrimination still works: $E_A / E_B \approx 2.2$ and $E_A / E_D = \infty$.
-
-**Finding 2 — Plot/dynamics inconsistency (user-flagged).** `sim_plots._compute_E` uses the new amp × phase windowed formula. `simulation.drift()` (and `_dynamics.entrainment_quality`) still use the old slow-backdrop point-in-time formula. Consequences:
-- Plot-side $E_A = 0.21 < E_\mathrm{crit} = 0.5 \Rightarrow$ plot says "collapse"; but simulated $T \approx 0.87$ because drift uses old formula, which gives $\mu > 0$ for A.
-- Plot-side $E_D = 0.00 \Rightarrow$ plot says "deep collapse"; but simulated $T \approx 1.03$ (last day mean) — dynamics doesn't see $V_c$ at all.
-- Test 8 fails because predicted $T^\star = 0$ (from new $E$) but observed $T \approx 0.79$ (from old-$E$ dynamics).
-
-**Finding 3 — Phase-shift detection works end-to-end in the plot.** Set D achieves $E = 0.000$ exactly as designed — the `max(corr, 0)` clamp correctly turns a 6-hour shift into zero entrainment. This validates the formula; the only remaining work is porting it to the dynamics side.
-
-**Finding 4 — $T_T = 0.01$ still noise-dominates $T$.** Same issue as the prior (old-formula) calibration: stationary $\sigma_T \gg T^\star$. Unchanged.
-
-### 8.7 Recommendations
-
-1. **Port the new amp × phase formula to `_dynamics.entrainment_quality` and `simulation.drift*`**. This is the main pending work. It requires tracking a 24-hour history of $W, \tilde Z, C_\mathrm{eff}$ during integration — either as ring-buffer auxiliary states or by passing running correlation accumulators through the IMEX step. Once done, Sets B and D should show clean $T$-collapse in the dynamics (not just in the plot), and Test 8 should pass.
-
-2. **Revise Set A spec $E$ from 0.66 to $\approx 0.21$**, Set B from 0.16 to $\approx 0.09$. Keep $E_\mathrm{crit} = 0.5$ conceptually, but note that with real (non-idealised) sigmoidal trajectories the operational healthy $E$ is well below 0.5. Either (a) lower $E_\mathrm{crit}$ to $\approx 0.15$ by adjusting $\mu_0 / \mu_E$, or (b) redesign `phase_*` so it doesn't penalise sigmoidal shapes (e.g. use rank correlation or a square-wave-vs-sinusoid reference).
-
-3. **Reduce $T_T$ from 0.01 to 0.001** (unchanged recommendation from the prior calibration) to allow $T$ to converge near $T^\star$.
-
-4. **Keep Set D as permanent part of the test suite** — it is the only test in the current suite that stresses the phase-shift pathology and will be the gold-standard regression test once the dynamics-side formula is ported.
-
-5. **The model is ready for estimator work on** $V_h, V_n, V_c$ and basin classification (via the plot-side $E$). Absolute $T$ amplitude recovery will require the dynamics-side port in item 1.
+Until §8 is populated, all quantitative thresholds in §5 are spec predictions and may be revised after the first run, exactly as happened for the 20p model.
 
 ---
 

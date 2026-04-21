@@ -1,0 +1,2 @@
+T* = 0.000, L_initial = 0.001, L_final = 0.1128
+Lyapunov violations (smoothed, threshold 2%): 0/3888 = 0.0%

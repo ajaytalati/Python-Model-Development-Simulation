@@ -1,0 +1,3 @@
+sim: swat v1.0
+est: swat n_dim = 35 ( 31 params + 4 init )
+n_states = 7 , n_stochastic = 4
