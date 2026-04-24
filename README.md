@@ -17,6 +17,10 @@ Six models live under [`version_1/models/`](version_1/models/). See [`version_1/
 | [`sleep_wake_20p`](version_1/model_documentation/sleep_wake_20p/sleep_wake_20p_Documentation.md) | Minimal 20-parameter sleep-wake-adenosine — identifiability-proof-driven. |
 | [`swat`](version_1/model_documentation/swat/SWAT_Basic_Documentation.md) | Sleep-Wake-Adenosine-Testosterone — extends `sleep_wake_20p` with a Stuart-Landau HPG amplitude. |
 
+## Adding a new model
+
+See [`how_to_add_a_new_model/`](how_to_add_a_new_model/) — a self-contained guide that walks a human or agent from "I have a mathematical spec" to "I have a working, tested, documented model" in ~15 minutes for simple cases. Starts with a copy-pasteable template at [`version_1/models/_template_model/`](version_1/models/_template_model/).
+
 ## Running a simulation
 
 From the `version_1/` directory:
@@ -51,9 +55,11 @@ The SWAT model ships a self-contained test suite in [`version_1/models/swat/TEST
 ```
 Python-Model-Development-Simulation/
 ├── README.md                              # you are here
+├── how_to_add_a_new_model/                # guide for adding new models
 └── version_1/
     ├── simulator/                         # generic CLI + scipy/Diffrax solvers
     ├── models/                            # one subdirectory per model
+    │   ├── _template_model/               # copy-me skeleton for new models
     │   ├── bistable_controlled/
     │   ├── fitness_strain_amplitude/
     │   ├── fsa_real_obs/

@@ -18,6 +18,10 @@ Audience-facing specifications for the six SDE models in [`version_1/models/`](.
 - [`swat/SWAT_Clinical_Specification.md`](swat/SWAT_Clinical_Specification.md) — clinical interpretation, pathology modes, and intervention targets for SWAT.
 - [`swat/SWAT_Identifiability_Extension.md`](swat/SWAT_Identifiability_Extension.md) — formal Fisher-rank identifiability analysis.
 
+## Adding a new model
+
+See [`how_to_add_a_new_model/`](../../how_to_add_a_new_model/) at the repo root — a step-by-step guide and copy-pasteable template for building new SDE models. Pairs with the skeleton at [`version_1/models/_template_model/`](../models/_template_model/).
+
 ## How these docs relate to `TESTING.md`
 
 Models under active development (currently `sleep_wake_20p` and `swat`) carry a `TESTING.md` alongside their code. That file contains the **live, code-coupled spec** — the mathematical definition used by the simulator, the numerical parameter sets, and the regression test suite with thresholds. When the implementation and the spec disagree, `TESTING.md` is the source of truth. These per-model docs are audience-facing summaries that link back to the TESTING.md for exact thresholds.
