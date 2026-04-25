@@ -155,29 +155,91 @@ PI = {k: i for i, k in enumerate(_PK)}
 # ─── Grid alignment (identical to 20p) ───────────────────────────
 
 def align_obs_fn(obs_data, t_steps, dt_hours):
-    """Convert simulator channel dict into grid-aligned JAX arrays."""
-    del dt_hours
+    """Convert multi-channel simulator output into grid-aligned arrays.
+
+    ``obs_data`` is the per-channel dict-of-dicts the SDEModel produces:
+
+        {'hr':     {'t_idx': ..., 'hr_value': ...},
+         'sleep':  {'t_idx': ..., 'sleep_level': ...},      # 3-level ordinal
+         'steps':  {'t_idx': ..., 'steps': ..., 'bin_hours': float},
+         'stress': {'t_idx': ..., 'stress_score': ...}}
+
+    Each channel may be absent (e.g. real wearable data without stress);
+    its ``*_present`` mask stays at zero everywhere.
+
+    Backward-compatibility: if ``obs_data`` is a single flat dict
+    containing 't_idx' at the top level (the legacy 20p / sleep_wake
+    convention), it is interpreted as the HR + binary-sleep channel
+    pair, with the binary sleep promoted to ordinal level 0/1
+    (level 1 = "any sleep").
+    """
+    del dt_hours   # grids are dense (simulator output)
     T = t_steps
-    hr_val = np.zeros(T, dtype=np.float32)
-    hr_pres = np.zeros(T, dtype=np.float32)
-    sl_lab = np.zeros(T, dtype=np.int32)
-    sl_pres = np.zeros(T, dtype=np.float32)
+
+    def _zeros(dtype=np.float32):
+        return np.zeros(T, dtype=dtype)
+
+    hr_val   = _zeros(); hr_pres   = _zeros()
+    sl_lev   = _zeros(np.int32); sl_pres = _zeros()
+    st_count = _zeros(np.int32); st_pres = _zeros(); bin_hours_val = 0.25
+    str_val  = _zeros(); str_pres  = _zeros()
+
+    def _ingest_channel(ch_data, mask_into, value_key, value_into,
+                        cast=lambda a: a.astype(np.float32)):
+        idx = np.asarray(ch_data['t_idx']).astype(int)
+        m = (idx >= 0) & (idx < T)
+        value_into[idx[m]] = cast(np.asarray(ch_data[value_key])[m])
+        mask_into[idx[m]] = 1.0
 
     if 't_idx' in obs_data:
-        idx = np.asarray(obs_data['t_idx']).astype(int)
+        # Legacy flat-dict input (20p convention). Promote binary sleep
+        # label to ordinal levels 0/1.
         if 'hr_value' in obs_data:
-            hr_val[idx] = np.asarray(obs_data['hr_value']).astype(np.float32)
-            hr_pres[idx] = 1.0
+            _ingest_channel(obs_data, hr_pres, 'hr_value', hr_val)
         if 'sleep_label' in obs_data:
-            sl_lab[idx] = np.asarray(obs_data['sleep_label']).astype(np.int32)
-            sl_pres[idx] = 1.0
+            _ingest_channel(obs_data, sl_pres, 'sleep_label', sl_lev,
+                            cast=lambda a: a.astype(np.int32))
+    else:
+        # Multi-channel input. Each per-channel dict was already
+        # window-extracted upstream.
+        hr_ch  = obs_data.get('hr')     or obs_data.get('obs_hr')
+        sl_ch  = obs_data.get('sleep')  or obs_data.get('obs_sleep')
+        st_ch  = obs_data.get('steps')  or obs_data.get('obs_steps')
+        str_ch = obs_data.get('stress') or obs_data.get('obs_stress')
+
+        if hr_ch is not None and 'hr_value' in hr_ch:
+            _ingest_channel(hr_ch, hr_pres, 'hr_value', hr_val)
+
+        if sl_ch is not None:
+            if 'sleep_level' in sl_ch:
+                _ingest_channel(sl_ch, sl_pres, 'sleep_level', sl_lev,
+                                cast=lambda a: a.astype(np.int32))
+            elif 'sleep_label' in sl_ch:
+                # Binary fallback (20p-era data); treat as ordinal level
+                _ingest_channel(sl_ch, sl_pres, 'sleep_label', sl_lev,
+                                cast=lambda a: a.astype(np.int32))
+
+        if st_ch is not None and 'steps' in st_ch:
+            _ingest_channel(st_ch, st_pres, 'steps', st_count,
+                            cast=lambda a: a.astype(np.int32))
+            bin_hours_val = float(st_ch.get('bin_hours', 0.25))
+
+        if str_ch is not None and 'stress_score' in str_ch:
+            _ingest_channel(str_ch, str_pres, 'stress_score', str_val)
+
+    has_any = np.maximum.reduce([hr_pres, sl_pres, st_pres, str_pres])
 
     return {
-        'hr_value':     jnp.array(hr_val),
-        'hr_present':   jnp.array(hr_pres),
-        'sleep_label':  jnp.array(sl_lab),
-        'sleep_present':jnp.array(sl_pres),
-        'has_any_obs':  jnp.array(np.maximum(hr_pres, sl_pres)),
+        'hr_value':       jnp.array(hr_val),
+        'hr_present':     jnp.array(hr_pres),
+        'sleep_level':    jnp.array(sl_lev),
+        'sleep_present':  jnp.array(sl_pres),
+        'steps_count':    jnp.array(st_count),
+        'steps_present':  jnp.array(st_pres),
+        'bin_hours':      jnp.float32(bin_hours_val),
+        'stress_value':   jnp.array(str_val),
+        'stress_present': jnp.array(str_pres),
+        'has_any_obs':    jnp.array(has_any),
     }
 
 
@@ -203,31 +265,74 @@ def _hr_log_prob(y, grid_obs, k, params):
 
 
 def _sleep_log_prob(y, grid_obs, k, params):
-    p = dyn.sleep_prob(y, params, PI)
-    p_safe = jnp.clip(p, 1e-8, 1.0 - 1e-8)
-    s = grid_obs['sleep_label'][k].astype(p.dtype)
-    return grid_obs['sleep_present'][k] * (
-        s * jnp.log(p_safe) + (1.0 - s) * jnp.log(1.0 - p_safe))
+    """3-level ordinal sleep log-prob.
+
+    grid_obs['sleep_level'][k] is an int in {0, 1, 2}; gather the
+    corresponding log-probability from
+    ``dyn.sleep_level_log_probs(y, params, PI)``.
+    """
+    log_pmf = dyn.sleep_level_log_probs(y, params, PI)   # shape (3,)
+    level_k = grid_obs['sleep_level'][k]
+    ll = log_pmf[level_k]
+    return grid_obs['sleep_present'][k] * ll
+
+
+def _steps_log_prob(y, grid_obs, k, params):
+    """Poisson log-prob: log P(N = n | rate * bin_hours).
+
+    The simulator emits step counts only on 15-min bin starts, so
+    grid_obs['steps_present'][k] is sparse. Uses lgamma for the log
+    factorial term.
+    """
+    rate = dyn.steps_rate(y, params, PI)
+    expected = rate * grid_obs['bin_hours']
+    n = grid_obs['steps_count'][k].astype(expected.dtype)
+    # Log Poisson pmf: n*log(λ) - λ - lgamma(n+1)
+    log_pmf = n * jnp.log(jnp.maximum(expected, 1e-12)) \
+              - expected - jax.lax.lgamma(n + 1.0)
+    return grid_obs['steps_present'][k] * log_pmf
+
+
+def _stress_log_prob(y, grid_obs, k, params):
+    """Gaussian log-prob for the stress channel."""
+    sigma_s = params[PI['sigma_s']]
+    mean = dyn.stress_mean(y, params, PI)
+    resid = grid_obs['stress_value'][k] - mean
+    return grid_obs['stress_present'][k] * (
+        -0.5 * (resid / sigma_s) ** 2 - jnp.log(sigma_s) - HALF_LOG_2PI)
 
 
 def obs_log_prob_fn(y, grid_obs, k, params):
-    return _hr_log_prob(y, grid_obs, k, params) + \
-           _sleep_log_prob(y, grid_obs, k, params)
+    """Joint log-likelihood across all 4 channels at step k."""
+    return (_hr_log_prob(y, grid_obs, k, params)
+            + _sleep_log_prob(y, grid_obs, k, params)
+            + _steps_log_prob(y, grid_obs, k, params)
+            + _stress_log_prob(y, grid_obs, k, params))
 
 
 def gaussian_obs_fn(y, grid_obs, k, params):
-    """HR-only Gaussian info for the EKF (sleep is non-Gaussian)."""
+    """Gaussian-channel info for the EKF (HR + stress; sleep + steps
+    are non-Gaussian and handled via obs_log_weight_fn)."""
     return {
-        'mean':     jnp.array([dyn.hr_mean(y, params, PI)]),
-        'value':    jnp.array([grid_obs['hr_value'][k]]),
-        'cov_diag': jnp.array([params[PI['sigma_HR']] ** 2]),
-        'present':  jnp.array([grid_obs['hr_present'][k]]),
+        'mean':     jnp.array([dyn.hr_mean(y, params, PI),
+                                dyn.stress_mean(y, params, PI)]),
+        'value':    jnp.array([grid_obs['hr_value'][k],
+                                grid_obs['stress_value'][k]]),
+        'cov_diag': jnp.array([params[PI['sigma_HR']] ** 2,
+                                params[PI['sigma_s']] ** 2]),
+        'present':  jnp.array([grid_obs['hr_present'][k],
+                                grid_obs['stress_present'][k]]),
     }
 
 
 def obs_log_weight_fn(x_new, grid_obs, k, params):
-    """PF observation weight: binary sleep only."""
-    return _sleep_log_prob(x_new, grid_obs, k, params)
+    """PF observation weight: non-Gaussian channels (sleep + steps)
+    plus stress. HR is absorbed into ``propagate_fn``'s Pitt-Shephard
+    guidance, so it must NOT be re-counted here.
+    """
+    return (_sleep_log_prob(x_new, grid_obs, k, params)
+            + _steps_log_prob(x_new, grid_obs, k, params)
+            + _stress_log_prob(x_new, grid_obs, k, params))
 
 
 # ─── Guided proposal for W (identical pattern to 20p) ────────────

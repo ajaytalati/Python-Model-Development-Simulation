@@ -290,5 +290,62 @@ def hr_mean(y: Array, params: Array, pi: Dict[str, int]) -> Array:
 
 
 def sleep_prob(y: Array, params: Array, pi: Dict[str, int]) -> Array:
-    """Prob(sleep = 1 | y) = sigmoid(Zt - c_tilde)."""
+    """Prob(sleep ≥ 1 | y) = sigmoid(Zt - c_tilde).
+
+    Backward-compatible binary helper retained for callers that only
+    need the wake-vs-sleep cut. For 3-level inference, use
+    ``sleep_level_log_probs``.
+    """
     return jax.nn.sigmoid(y[1] - params[pi['c_tilde']])
+
+
+def sleep_level_log_probs(y: Array, params: Array,
+                           pi: Dict[str, int]) -> Array:
+    """Log-probabilities of the 3-level ordinal sleep stages.
+
+    Mirrors ``simulation.py:gen_sleep`` exactly:
+        c1 = c_tilde,  c2 = c_tilde + delta_c
+        s1 = sigmoid(Zt - c1)         # P(sleep, any)
+        s2 = sigmoid(Zt - c2)         # P(deep)
+        P(level=0 = wake)      = 1 - s1
+        P(level=1 = light+REM) = s1 - s2
+        P(level=2 = deep)      = s2
+
+    Returns array of shape (3,) with log P(level=k | y).
+    """
+    Zt = y[1]
+    c1 = params[pi['c_tilde']]
+    c2 = c1 + params[pi['delta_c']]
+    s1 = jax.nn.sigmoid(Zt - c1)
+    s2 = jax.nn.sigmoid(Zt - c2)
+
+    p0 = 1.0 - s1
+    p1 = s1 - s2
+    p2 = s2
+    safe = lambda p: jnp.clip(p, 1e-12, 1.0)
+    return jnp.array([jnp.log(safe(p0)), jnp.log(safe(p1)), jnp.log(safe(p2))])
+
+
+def steps_rate(y: Array, params: Array, pi: Dict[str, int]) -> Array:
+    """Poisson rate (counts per hour) given state y.
+
+    Mirrors ``simulation.py:gen_steps``:
+        rate(W) = lambda_base + lambda_step * sigmoid(10 * (W - W_thresh))
+    """
+    W = y[0]
+    return (params[pi['lambda_base']]
+            + params[pi['lambda_step']]
+            * jax.nn.sigmoid(10.0 * (W - params[pi['W_thresh']])))
+
+
+def stress_mean(y: Array, params: Array, pi: Dict[str, int]) -> Array:
+    """Predicted Garmin stress score given state y.
+
+    Mirrors ``simulation.py:gen_stress``:
+        mean = s_base + alpha_s * W + beta_s * Vn
+    (no clip in the predictor — clipping is sim-side noise modelling).
+    """
+    W, Vn = y[0], y[6]
+    return (params[pi['s_base']]
+            + params[pi['alpha_s']] * W
+            + params[pi['beta_s']] * Vn)
