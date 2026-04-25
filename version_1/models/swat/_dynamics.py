@@ -136,7 +136,16 @@ def compute_sigmoid_args(y: Array, t: Array, params: Array,
 
 def drift(y: Array, t: Array, params: Array,
           pi: Dict[str, int]) -> Array:
-    """Drift vector for the SWAT SDE (7D; 4 stochastic components)."""
+    """Drift vector for the SWAT SDE (7D; 4 stochastic components).
+
+    The C state's drift is the analytical d/dt of the external light
+    cycle so that ``drift`` matches ``simulation.py:drift`` and
+    ``simulation.py:drift_jax`` exactly. The IMEX step also explicitly
+    resets C to its analytical value at each substep, making this
+    redundant at integration time — but not at sim/est consistency-
+    check time, where the drift values must agree per the §1.4
+    discipline (Python-Model-Scenario-Simulation §1.4).
+    """
     W, Zt, a, T = y[0], y[1], y[2], y[3]
     u_W, u_Z = compute_sigmoid_args(y, t, params, pi)
 
@@ -156,7 +165,11 @@ def drift(y: Array, t: Array, params: Array,
     da  = (W - a) / tau_a
     dT  = (mu_bifurc * T - eta * T ** 3) / tau_T
 
-    return jnp.array([dW, dZt, da, dT, 0.0, 0.0, 0.0])
+    # External light cycle (deterministic). Matches simulation.py.
+    dC = (2.0 * jnp.pi / 24.0) * jnp.cos(2.0 * jnp.pi * t / 24.0
+                                           + PHI_MORNING_TYPE)
+
+    return jnp.array([dW, dZt, da, dT, dC, 0.0, 0.0])
 
 
 # =========================================================================
