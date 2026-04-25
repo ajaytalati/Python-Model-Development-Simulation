@@ -136,7 +136,16 @@ def compute_sigmoid_args(y: Array, t: Array, params: Array,
 
 def drift(y: Array, t: Array, params: Array,
           pi: Dict[str, int]) -> Array:
-    """Drift vector for the SWAT SDE (7D; 4 stochastic components)."""
+    """Drift vector for the SWAT SDE (7D; 4 stochastic components).
+
+    The C state's drift is the analytical d/dt of the external light
+    cycle so that ``drift`` matches ``simulation.py:drift`` and
+    ``simulation.py:drift_jax`` exactly. The IMEX step also explicitly
+    resets C to its analytical value at each substep, making this
+    redundant at integration time — but not at sim/est consistency-
+    check time, where the drift values must agree per the §1.4
+    discipline (Python-Model-Scenario-Simulation §1.4).
+    """
     W, Zt, a, T = y[0], y[1], y[2], y[3]
     u_W, u_Z = compute_sigmoid_args(y, t, params, pi)
 
@@ -156,7 +165,11 @@ def drift(y: Array, t: Array, params: Array,
     da  = (W - a) / tau_a
     dT  = (mu_bifurc * T - eta * T ** 3) / tau_T
 
-    return jnp.array([dW, dZt, da, dT, 0.0, 0.0, 0.0])
+    # External light cycle (deterministic). Matches simulation.py.
+    dC = (2.0 * jnp.pi / 24.0) * jnp.cos(2.0 * jnp.pi * t / 24.0
+                                           + PHI_MORNING_TYPE)
+
+    return jnp.array([dW, dZt, da, dT, dC, 0.0, 0.0])
 
 
 # =========================================================================
@@ -290,5 +303,62 @@ def hr_mean(y: Array, params: Array, pi: Dict[str, int]) -> Array:
 
 
 def sleep_prob(y: Array, params: Array, pi: Dict[str, int]) -> Array:
-    """Prob(sleep = 1 | y) = sigmoid(Zt - c_tilde)."""
+    """Prob(sleep ≥ 1 | y) = sigmoid(Zt - c_tilde).
+
+    Backward-compatible binary helper retained for callers that only
+    need the wake-vs-sleep cut. For 3-level inference, use
+    ``sleep_level_log_probs``.
+    """
     return jax.nn.sigmoid(y[1] - params[pi['c_tilde']])
+
+
+def sleep_level_log_probs(y: Array, params: Array,
+                           pi: Dict[str, int]) -> Array:
+    """Log-probabilities of the 3-level ordinal sleep stages.
+
+    Mirrors ``simulation.py:gen_sleep`` exactly:
+        c1 = c_tilde,  c2 = c_tilde + delta_c
+        s1 = sigmoid(Zt - c1)         # P(sleep, any)
+        s2 = sigmoid(Zt - c2)         # P(deep)
+        P(level=0 = wake)      = 1 - s1
+        P(level=1 = light+REM) = s1 - s2
+        P(level=2 = deep)      = s2
+
+    Returns array of shape (3,) with log P(level=k | y).
+    """
+    Zt = y[1]
+    c1 = params[pi['c_tilde']]
+    c2 = c1 + params[pi['delta_c']]
+    s1 = jax.nn.sigmoid(Zt - c1)
+    s2 = jax.nn.sigmoid(Zt - c2)
+
+    p0 = 1.0 - s1
+    p1 = s1 - s2
+    p2 = s2
+    safe = lambda p: jnp.clip(p, 1e-12, 1.0)
+    return jnp.array([jnp.log(safe(p0)), jnp.log(safe(p1)), jnp.log(safe(p2))])
+
+
+def steps_rate(y: Array, params: Array, pi: Dict[str, int]) -> Array:
+    """Poisson rate (counts per hour) given state y.
+
+    Mirrors ``simulation.py:gen_steps``:
+        rate(W) = lambda_base + lambda_step * sigmoid(10 * (W - W_thresh))
+    """
+    W = y[0]
+    return (params[pi['lambda_base']]
+            + params[pi['lambda_step']]
+            * jax.nn.sigmoid(10.0 * (W - params[pi['W_thresh']])))
+
+
+def stress_mean(y: Array, params: Array, pi: Dict[str, int]) -> Array:
+    """Predicted Garmin stress score given state y.
+
+    Mirrors ``simulation.py:gen_stress``:
+        mean = s_base + alpha_s * W + beta_s * Vn
+    (no clip in the predictor — clipping is sim-side noise modelling).
+    """
+    W, Vn = y[0], y[6]
+    return (params[pi['s_base']]
+            + params[pi['alpha_s']] * W
+            + params[pi['beta_s']] * Vn)
