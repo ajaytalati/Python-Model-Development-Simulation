@@ -6,13 +6,14 @@ Every model is a set of coupled Itô stochastic differential equations, a diffus
 
 ## Models
 
-Six models live under [`version_1/models/`](version_1/models/). See [`version_1/model_documentation/README.md`](version_1/model_documentation/README.md) for the full per-model doc index; one-line summaries below:
+Seven models live under [`version_1/models/`](version_1/models/). See [`version_1/model_documentation/README.md`](version_1/model_documentation/README.md) for the full per-model doc index; one-line summaries below:
 
 | Model | Description |
 |:---|:---|
 | [`bistable_controlled`](version_1/model_documentation/bistable_controlled/bistable_controlled_Documentation.md) | Controlled double-well SDE — pedagogical intervention testbed. |
 | [`fitness_strain_amplitude`](version_1/model_documentation/fitness_strain_amplitude/FSA_Basic_Documentation.md) | 3-state Fitness-Strain-Amplitude SDE with direct state observation. |
 | [`fsa_real_obs`](version_1/model_documentation/fsa_real_obs/fsa_real_obs_Documentation.md) | FSA with six physiological observation channels (RHR, intensity, duration, stress, sleep, timing). |
+| [`fsa_high_res`](version_1/model_documentation/fsa_high_res/fsa_high_res_Documentation.md) | 15-min-bin FSA variant; 4 mixed-likelihood channels (HR Gaussian, sleep Bernoulli, stress Gaussian, log-Gaussian steps) + circadian forcing C(t). |
 | [`sleep_wake`](version_1/model_documentation/sleep_wake/sleep_wake_Documentation.md) | 6-state sleep-wake-adenosine SDE with four Garmin-style channels. |
 | [`sleep_wake_20p`](version_1/model_documentation/sleep_wake_20p/sleep_wake_20p_Documentation.md) | Minimal 20-parameter sleep-wake-adenosine — identifiability-proof-driven. |
 | [`swat`](version_1/model_documentation/swat/SWAT_Basic_Documentation.md) | Sleep-Wake-Adenosine-Testosterone — extends `sleep_wake_20p` with a Stuart-Landau HPG amplitude. |
