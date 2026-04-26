@@ -414,7 +414,28 @@ def gen_stress(trajectory, t_grid, params, aux, prior_channels, seed):
 # =========================================================================
 
 def verify_physics(trajectory, t_grid, params):
-    """Minimal checks: states in expected ranges, T positivity, transitions observed."""
+    """Range / finiteness checks PLUS biological-realism metrics.
+
+    Two classes of return value:
+
+      - **Gating booleans** (must be True for ``PASS: physics
+        verification`` to fire): ``W_in_0_1``, ``Zt_in_0_A``,
+        ``a_nonneg``, ``T_nonneg``, ``T_bounded``, ``all_finite``.
+        These are the necessary range / finiteness checks.
+
+      - **Informational metrics + ``*_realistic`` flags**: numeric
+        values plus string ``"yes"/"no"`` flags that indicate whether
+        the simulated trajectory exhibits realistic sleep architecture.
+        These do NOT gate (CLI's PASS line ignores non-bool fields and
+        ignores string-typed flags) but ARE clearly visible in the
+        run output so a modeller can spot tuning issues at simulation
+        time, before a downstream consumer (psim, SMC²) wastes effort
+        trying to fit data with wrong-shape dynamics.
+
+    See public-dev #6 / public-dev #5 for the motivating story
+    (SWAT Set A's Zt amplitude limit was found by an SMC² downstream
+    diagnostic plot; should have been caught here).
+    """
     del t_grid
     W, Zt, a, T = (trajectory[:, 0], trajectory[:, 1],
                     trajectory[:, 2], trajectory[:, 3])
@@ -425,17 +446,45 @@ def verify_physics(trajectory, t_grid, params):
     mu_max = mu_0 + mu_E  # E <= 1
     T_max_expected = math.sqrt(max(mu_max / eta, 0.0)) if mu_max > 0 else 0.0
 
+    # ── Sleep-architecture realism (informational) ────────────────────
+    c_tilde = params['c_tilde']
+    delta_c = params['delta_c']
+    c2      = c_tilde + delta_c
+    sleep_frac      = float((Zt > c_tilde).mean())   # fraction of bins with Zt > c1
+    deep_sleep_frac = float((Zt > c2).mean())        # fraction of bins with Zt > c2
+    Zt_max          = float(Zt.max())
+    Zt_p99          = float(np.percentile(Zt, 99))
+
+    # Healthy-adult reference ranges:
+    #   total sleep:  25-40% of 24h (i.e. 6-10h sleep per day)
+    #   deep sleep:   3-12% of 24h (typically ~5-8% in middle-aged adults)
+    #   Zt should reach c2 deterministically during overnight peaks
+    sleep_realistic       = "yes" if 0.25 <= sleep_frac <= 0.40 else "no"
+    deep_sleep_realistic  = "yes" if 0.03 <= deep_sleep_frac <= 0.15 else "no"
+    Zt_reaches_c2         = "yes" if Zt_p99 > c2 else "no"
+
     return {
+        # ── Gating booleans (range + finiteness) ──────────────────────
         'W_in_0_1':       bool((W.min() > -0.05) and (W.max() < 1.05)),
         'Zt_in_0_A':      bool((Zt.min() > -0.5) and (Zt.max() < A_SCALE + 0.5)),
         'a_nonneg':       bool(a.min() > -0.5),
         'T_nonneg':       bool(T.min() > -0.1),
         'T_bounded':      bool(T.max() < 4.0 * max(T_max_expected, 1.0) + 1.0),
+        'all_finite':     bool(np.all(np.isfinite(trajectory))),
+        # ── Informational state-range metrics ─────────────────────────
         'W_range':        float(W.max() - W.min()),
         'Zt_range':       float(Zt.max() - Zt.min()),
         'T_range':        float(T.max() - T.min()),
         'T_mean':         float(T.mean()),
-        'all_finite':     bool(np.all(np.isfinite(trajectory))),
+        # ── Sleep-architecture realism (informational; see docstring) ─
+        'sleep_fraction':                         sleep_frac,
+        'deep_sleep_fraction':                    deep_sleep_frac,
+        'Zt_max':                                 Zt_max,
+        'Zt_p99':                                 Zt_p99,
+        'c2_threshold':                           float(c2),
+        'sleep_fraction_realistic':               sleep_realistic,
+        'deep_sleep_fraction_realistic':          deep_sleep_realistic,
+        'Zt_reaches_deep_threshold_realistic':    Zt_reaches_c2,
     }
 
 
