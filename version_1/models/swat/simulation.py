@@ -509,9 +509,23 @@ PARAM_SET_A = {
     'HR_base':   50.0,
     'alpha_HR':  25.0,
     'sigma_HR':   8.0,
-    'c_tilde':    3.0,
+    # Re-tuned 2026-04-26 (was 3.0): lower sleep threshold so total
+    # sleep fraction reaches healthy ~33%/day. Closes
+    # https://github.com/ajaytalati/Python-Model-Development-Simulation/issues/8
+    # Without this change, sleep_fraction was ~19% with the new
+    # beta_Z=4.0 (#5/#7); the (a→Zt) coupling pushes Zt high enough
+    # for the first ~7-8h of sleep but not for the full overnight
+    # period because a drains with tau_a=3h.
+    'c_tilde':    2.5,
     'tau_a':      3.0,
-    'beta_Z':     2.5,
+    # Re-tuned 2026-04-26 (was 2.5): boost adenosine→Zt coupling so
+    # overnight Zt amplitude reaches the deep-sleep threshold
+    # c2 = c_tilde + delta_c = 4.5 deterministically. Closes
+    # https://github.com/ajaytalati/Python-Model-Development-Simulation/issues/5
+    # (Zt was peaking at ~4.3 with beta_Z=2.5; deep-sleep happened only
+    # via the stochastic noise floor, impairing identifiability of
+    # (delta_c, beta_Z, tau_a) joint in downstream SMC² inference).
+    'beta_Z':     4.0,
     'T_W':        0.01,
     'T_Z':        0.05,
     'T_a':        0.01,
