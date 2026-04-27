@@ -44,12 +44,16 @@ _STATE_NAMES = ('S', 'I')
 # DRIFT
 # =========================================================================
 
-def drift_jax(y, params, frozen, pi):
+def drift_jax(y, t, params, frozen, pi):
     """Frequency-dependent SIR drift.
+
+    Signature matches the canonical SWAT pattern ``(y, t, params, ...)``;
+    ``t`` is unused for SIR (autonomous SDE) but kept for uniformity.
 
     With optional vaccination control input ``frozen['v']`` (∈ ℝ⁺,
     units 1/hr); zero in baseline scenarios.
     """
+    del t
     S, I = y[0], y[1]
     N = frozen['N']
     v = frozen['v']
@@ -84,8 +88,7 @@ def imex_step_deterministic(y, t, dt, params, frozen, pi):
     For SIR with hourly dt, explicit Euler is stable up to R_0 ≈ 8-10. Higher
     R_0 or smaller-dt regimes would warrant a semi-implicit splitting.
     """
-    del t
-    return y + dt * drift_jax(y, params, frozen, pi)
+    return y + dt * drift_jax(y, t, params, frozen, pi)
 
 
 def imex_step_stochastic(y, t, dt, params, sigma_diag, noise, frozen, pi):

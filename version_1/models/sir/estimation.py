@@ -59,6 +59,51 @@ INIT_STATE_PRIOR_CONFIG = OrderedDict([
     ('I_0',     ('lognormal', (math.log(1.0),   1.0))),
 ])
 
+# ─── Scenario-specific prior overrides ─────────────────────────────────
+# The default `PARAM_PRIOR_CONFIG` above is centered on Set A truth (the
+# paper-parity benchmark). For Sets B/C/D — same model, different operating
+# regime (lower rates, larger population, different ρ) — the priors need
+# to track. Otherwise the SMC² inference fights a 1-2 SD prior-truth gap
+# in every dimension and never converges. (See SF Path B-fixed history:
+# `outputs/SF_BEST_PRACTICE_2_models.md` for the analogous SWAT story.)
+#
+# Each entry is a partial override; missing keys fall through to the
+# Set-A default. ``make_sir_estimation`` consumes these via the
+# ``param_prior_overrides`` kwarg.
+
+PARAM_PRIOR_OVERRIDES_B = {
+    # Set B: β = 0.5/day = 0.0208/hr, γ = 0.2/day = 0.00833/hr, R₀ = 2.5,
+    #        σ_z = 0.005, T_S = T_I = 1.0 (same diffusion as Set A — sim
+    #        keeps temperatures fixed; only rates and population change),
+    #        I_0 = 5 (small community seed).
+    'beta':    ('lognormal', (math.log(0.0208),  0.4)),
+    'gamma':   ('lognormal', (math.log(0.00833), 0.3)),
+    'rho':     ('beta',      (5.0, 5.0)),     # mean 0.5 (community reporting)
+    'sigma_z': ('lognormal', (math.log(0.005),  0.5)),
+    'I_0':     ('lognormal', (math.log(5.0),    1.0)),
+    # T_S, T_I retain Set-A defaults (LogNormal(log 1, 0.5)) — match simulator truth.
+}
+
+PARAM_PRIOR_OVERRIDES_C = {
+    # Set C: β = 0.8/day = 0.0333/hr, γ = 0.2/day = 0.00833/hr, R₀ = 4.0,
+    #        σ_z = 0.005, I_0 = 10.
+    'beta':    ('lognormal', (math.log(0.0333),  0.4)),
+    'gamma':   ('lognormal', (math.log(0.00833), 0.3)),
+    'rho':     ('beta',      (5.0, 5.0)),
+    'sigma_z': ('lognormal', (math.log(0.005),  0.5)),
+    'I_0':     ('lognormal', (math.log(10.0),   1.0)),
+}
+
+PARAM_PRIOR_OVERRIDES_D = {
+    # Set D: β = 0.6/day = 0.025/hr, γ = 0.2/day = 0.00833/hr, R₀ = 3.0,
+    #        σ_z = 0.005, I_0 = 10, v = 0.02/day = 8.3e-4/hr (frozen, not estimated).
+    'beta':    ('lognormal', (math.log(0.025),   0.4)),
+    'gamma':   ('lognormal', (math.log(0.00833), 0.3)),
+    'rho':     ('beta',      (5.0, 5.0)),
+    'sigma_z': ('lognormal', (math.log(0.005),  0.5)),
+    'I_0':     ('lognormal', (math.log(10.0),   1.0)),
+}
+
 # Frozen (non-estimated) parameters — population size + vaccination rate.
 # Per-scenario overrides go via ``make_sir_estimation``: Set A N=763 boarding-
 # school, Sets B/C/D N=10000 community.
@@ -271,15 +316,38 @@ def get_init_theta():
 # EstimationModel factory + canonical instance
 # =========================================================================
 
-def make_sir_estimation(frozen_params: dict | None = None) -> EstimationModel:
-    """Build an EstimationModel with a specific frozen-param set.
+def make_sir_estimation(
+    frozen_params: dict | None = None,
+    param_prior_overrides: dict | None = None,
+) -> EstimationModel:
+    """Build an EstimationModel with scenario-specific overrides.
 
-    Use this to switch the population size N or activate vaccination ``v``
-    without re-defining the priors. Defaults to Set A (boarding school).
+    Args:
+      frozen_params: override ``DEFAULT_FROZEN_PARAMS`` (e.g. switch N=763
+        to N=10000 for Sets B/C/D, or activate vaccination v > 0).
+      param_prior_overrides: override individual prior entries in
+        ``PARAM_PRIOR_CONFIG`` (and / or ``INIT_STATE_PRIOR_CONFIG``) by
+        key. Use ``PARAM_PRIOR_OVERRIDES_B/C/D`` for canonical Sets B/C/D.
+
+    Defaults to Set A (boarding school).
     """
     frozen = dict(DEFAULT_FROZEN_PARAMS)
     if frozen_params:
         frozen.update(frozen_params)
+
+    # Merge prior overrides (supports both PARAM_* and INIT_STATE_* keys).
+    param_cfg = OrderedDict(PARAM_PRIOR_CONFIG)
+    init_cfg = OrderedDict(INIT_STATE_PRIOR_CONFIG)
+    if param_prior_overrides:
+        for k, v in param_prior_overrides.items():
+            if k in param_cfg:
+                param_cfg[k] = v
+            elif k in init_cfg:
+                init_cfg[k] = v
+            else:
+                raise KeyError(
+                    f"prior-override key {k!r} matches neither "
+                    f"PARAM_PRIOR_CONFIG nor INIT_STATE_PRIOR_CONFIG")
 
     return EstimationModel(
         name="sir",
@@ -291,8 +359,8 @@ def make_sir_estimation(frozen_params: dict | None = None) -> EstimationModel:
             (0.0, 1e9),    # S
             (0.0, 1e9),    # I
         ),
-        param_prior_config=PARAM_PRIOR_CONFIG,
-        init_state_prior_config=INIT_STATE_PRIOR_CONFIG,
+        param_prior_config=param_cfg,
+        init_state_prior_config=init_cfg,
         frozen_params=frozen,
         propagate_fn=_propagate_fn(frozen),
         diffusion_fn=diffusion_fn,

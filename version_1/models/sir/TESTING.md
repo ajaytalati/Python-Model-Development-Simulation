@@ -301,7 +301,7 @@ params_packed = jnp.array([params_dict[k] for k in pkeys])
 
 y = jnp.array([700.0, 50.0])    # mid-outbreak
 np_drift = drift(0.0, np.array(y), params_dict, None)
-jx_drift = drift_jax(y, params_packed, DEFAULT_FROZEN_PARAMS, PI)
+jx_drift = drift_jax(y, 0.0, params_packed, DEFAULT_FROZEN_PARAMS, PI)
 
 err = float(np.max(np.abs(np.array(jx_drift) - np_drift)))
 assert err < 1e-10, f'Drift mismatch: max |JAX - numpy| = {err}'
