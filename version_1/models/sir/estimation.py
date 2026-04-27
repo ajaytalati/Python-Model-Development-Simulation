@@ -15,6 +15,16 @@ Conventions:
     channels are non-Gaussian-or-sparse and contribute via
     ``obs_log_weight_fn``. Simpler than SWAT's HR-tilted proposal.
 
+    A serology Pitt-Shephard variant was experimentally tested
+    (cf. branch history): it healed the SF bridge q1 IS collapse
+    (n_eff 1-3 → 50-200) and held W2 of Set B for one extra window,
+    but ALSO regressed Set A (data-informed coverage dropped from
+    61.7% to 16.7%) by forcing the inference into a wrong mode at
+    cold-start. The bootstrap version is the known-good baseline
+    and is the canonical SIR `propagate_fn`. Sets B/C/D's multi-
+    window cascade collapse is documented as a separate open issue
+    that needs more research than the immediate fix can deliver.
+
 Priors are centered on Set A. For Sets B/C/D with different rate
 magnitudes, the SMC² driver should override with scenario-specific
 priors via ``SirRollingConfig``; or call ``make_sir_estimation`` with
