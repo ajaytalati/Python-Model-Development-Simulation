@@ -106,6 +106,20 @@ PARAM_PRIOR_CONFIG = OrderedDict([
     # drift wildly on the 48h timescale.
     ('T_T',      ('lognormal', (math.log(0.0001), 0.5))),
 
+    # ── Entrainment-amplitude block (V_h-anabolic structural fix) ──────
+    # V_h modulates entrainment amplitude rather than entering u_W
+    # directly.  A_W = lambda_amp_W * V_h, A_Z = lambda_amp_Z * V_h.
+    # Calibrated against the validation pipeline's gating tests so the
+    # healthy corner (V_h-healthy, V_n-low) gives strong entrainment
+    # E ~ 1, and the depleted-V_h corner gives E ~ 0.
+    ('lambda_amp_W', ('lognormal', (math.log(5.0), 0.3))),
+    ('lambda_amp_Z', ('lognormal', (math.log(8.0), 0.3))),
+    # V_n damper scale: damp(V_n) = exp(-V_n / V_n_scale).  Smaller =>
+    # V_n bites entrainment faster.  Pinned at 2.0 in the validation
+    # work; LogNormal here for consistency with the other positive
+    # scale parameters.
+    ('V_n_scale',    ('lognormal', (math.log(2.0), 0.3))),
+
     # ── 3-level ordinal sleep channel (Phase 1 addition) ──────────────
     # delta_c: gap between light/deep thresholds on Zt; c2 = c_tilde + delta_c.
     # Must be positive (ordering constraint satisfied automatically by LogNormal).
