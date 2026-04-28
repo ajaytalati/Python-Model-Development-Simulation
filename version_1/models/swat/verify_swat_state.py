@@ -1,25 +1,29 @@
-"""verify_swat_state.py — prove the SWAT code is in the V_c-aware state.
+"""verify_swat_state.py — prove the SWAT code is in the V_h-anabolic state.
 
-Run this from the framework root:
-    python3 verify_swat_state.py
+Run from the version_1 root:
+    PYTHONPATH=. python3 models/swat/verify_swat_state.py
 
 It does FIVE things:
     1. Reads the exact text of `_dynamics.entrainment_quality` — the
-       output must contain the V_c phase-quality block.
-    2. Reads `simulation.drift` — must contain V_c-aware inline E.
+       output must contain the V_h-anabolic amplitude formula, the
+       V_n damper, and the clamped phase quality.
+    2. Reads `simulation.drift` — must contain the V_h-anabolic
+       inline expressions matching _dynamics.
     3. Checks PARAM_SET_A T_0, PARAM_SET_B V_n, PARAM_SET_D existence.
     4. Runs the four canonical param sets (A/B/C/D) end-to-end on the
        scipy solver, 14 days, seed=42.
     5. Prints the T trajectory end-values side-by-side.
 
-Pass criteria (all four must hold):
-    • Set A T_end ≈ 0.56 (stable near T*)
-    • Set B T_end ≈ 0.12 (clean collapse from 0.5)
-    • Set C T_end ≈ 0.42 (recovery from 0.05)
-    • Set D T_end ≈ 0.11 (phase-shift collapse)
-
-If any Set reports T_end ≈ 0.79 or larger, the V_c-aware dynamics
-are NOT being loaded — likely a stale __pycache__ or wrong checkout.
+Pass criteria (all four must hold) — recalibrated for the V_h-anabolic
+fix:
+    • Set A T_end ≈ 0.90 (stable near new T*; healthy V_h drives strong
+       entrainment, mu(E)=mu_0+mu_E ≈ 0.5 so A* ≈ sqrt(0.5/0.5) ≈ 1)
+    • Set B T_end ≈ 0.11 (V_h-depleted AND V_n-high; entrainment
+       collapses, T → 0)
+    • Set C T_end ≈ 0.82 (healthy V_h, recovery from T_0=0.05 — even
+       stronger basin than A because no IC penalty)
+    • Set D T_end ≈ 0.11 (V_c=6 hours > V_c_max=3 hours clamp;
+       phase quality = 0 regardless of V_h)
 """
 import os
 import sys
@@ -46,15 +50,27 @@ def clear_caches(root):
 
 EXPECTED_DYNAMICS_PATTERNS = [
     r"V_c\s*=\s*params\[pi\['V_c'\]\]",
-    r"V_c_rad\s*=\s*2\.0\s*\*\s*jnp\.pi\s*\*\s*V_c\s*/\s*24\.0",
-    r"phase_quality\s*=\s*jnp\.maximum\(jnp\.cos\(V_c_rad\),\s*0\.0\)",
-    r"return amp_quality\s*\*\s*phase_quality",
+    # V_h enters via amplitude, NOT directly into u_W
+    r"A_W\s*=\s*lambda_amp_W\s*\*\s*Vh",
+    r"A_Z\s*=\s*lambda_amp_Z\s*\*\s*Vh",
+    # Clamped quarter-period amplitude
+    r"amp_W\s*=\s*jax\.nn\.sigmoid\(B_W\s*\+\s*A_W\)\s*-\s*jax\.nn\.sigmoid\(B_W\s*-\s*A_W\)",
+    # V_n damper
+    r"damp\s*=\s*jnp\.exp\(-Vn\s*/\s*V_n_scale\)",
+    # Clamped phase
+    r"V_c_eff\s*=\s*jnp\.minimum\(jnp\.abs\(V_c\),\s*V_C_MAX_HOURS\)",
+    r"return damp\s*\*\s*amp_quality\s*\*\s*phase_quality",
 ]
 
 EXPECTED_DRIFT_NP_PATTERNS = [
-    r"V_c_rad\s*=\s*2\.0\s*\*\s*math\.pi\s*\*\s*V_c\s*/\s*24\.0",
-    r"phase_quality\s*=\s*max\(math\.cos\(V_c_rad\),\s*0\.0\)",
-    r"E\s*=\s*amp_quality\s*\*\s*phase_quality",
+    # V_h enters via amplitude in numpy entrainment_quality + drift
+    r"A_W\s*=\s*p\['lambda_amp_W'\]\s*\*\s*Vh",
+    # V_n damper present
+    r"damp\s*=\s*math\.exp\(-Vn\s*/\s*p\['V_n_scale'\]\)",
+    # Clamped phase
+    r"V_c_eff\s*=\s*min\(abs\(V_c\),\s*V_C_MAX_HOURS\)",
+    r"phase_quality\s*=\s*math\.cos\(math\.pi\s*\*\s*V_c_eff\s*/",
+    r"E\s*=\s*damp\s*\*\s*amp_quality\s*\*\s*phase_quality",
 ]
 
 EXPECTED_PARAM_PATTERNS = [
@@ -129,12 +145,13 @@ def run_one_set(set_name, seed=42):
 
 # ─── Main ─────────────────────────────────────────────────────────────────
 
-# Expected T_end values (seed=42, 14 days, n_substeps=10)
+# Expected T_end values (seed=42, 14 days, n_substeps=10) — recalibrated
+# for the V_h-anabolic structural fix.
 EXPECTED = {
-    'A': (0.56, 0.08),   # (value, tolerance)
-    'B': (0.12, 0.08),
-    'C': (0.42, 0.10),
-    'D': (0.11, 0.08),
+    'A': (0.90, 0.08),   # healthy basin, strong entrainment
+    'B': (0.11, 0.08),   # V_h-depleted + V_n-high collapse
+    'C': (0.82, 0.10),   # recovery from T_0=0.05 under healthy V_h
+    'D': (0.11, 0.08),   # V_c=6 > V_c_max=3 clamps phase to 0
 }
 
 

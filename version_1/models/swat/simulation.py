@@ -83,6 +83,12 @@ A_SCALE = 6.0   # fixed rescaling constant for tilde-Z; NOT a parameter
 # V_c is in HOURS, positive = subject's rhythm shifted later than external light.
 PHI_MORNING_TYPE = -math.pi / 3.0
 
+# Clinical pathology threshold for the circadian phase shift.  Any
+# |V_c| >= V_C_MAX_HOURS collapses entrainment to zero.  Non-estimable
+# clinical constant (3 hours), kept as a module-level constant rather
+# than a parameter.  Must match _dynamics.V_C_MAX_HOURS.
+V_C_MAX_HOURS = 3.0
+
 
 # =========================================================================
 # ELEMENTARY HELPERS
@@ -114,24 +120,31 @@ def circadian_jax(t, params):
 
 
 def entrainment_quality(W, Zt, a, T, Vh, Vn, params):
-    """Amplitude × phase entrainment quality E in [0, 1] — V_c-aware.
+    """Entrainment quality E in [0, 1] — V_h-anabolic, V_n-catabolic.
 
-    Phase quality is a function of V_c ONLY (no daily ripple).  W, Zt
-    retained for API compatibility but unused here.
+    V_h modulates entrainment amplitude (V_h=0 collapses entrainment;
+    V_h-healthy strengthens it).  V_n appears as a multiplicative damper
+    AND inside the slow backdrop.  V_c collapses entrainment past
+    V_C_MAX_HOURS.  Phase quality depends on V_c only — no daily ripple.
+    W, Zt retained for API compatibility but unused here.
     """
     del W, Zt
     p = params
 
-    mu_W_slow = Vh + Vn - a + p['alpha_T'] * T
-    mu_Z_slow = -Vn + p['beta_Z'] * a
-    sW = float(_sigmoid(mu_W_slow))
-    sZ = float(_sigmoid(mu_Z_slow))
-    amp_quality = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + p['alpha_T'] * T
+    B_Z = -Vn + p['beta_Z'] * a
+    amp_W = float(_sigmoid(B_W + A_W) - _sigmoid(B_W - A_W))
+    amp_Z = float(_sigmoid(B_Z + A_Z) - _sigmoid(B_Z - A_Z))
+    amp_quality = amp_W * amp_Z
 
-    V_c_rad = 2.0 * math.pi * p['V_c'] / 24.0
-    phase_quality = max(math.cos(V_c_rad), 0.0)
+    damp = math.exp(-Vn / p['V_n_scale'])
 
-    return amp_quality * phase_quality
+    V_c_eff = min(abs(p['V_c']), V_C_MAX_HOURS)
+    phase_quality = math.cos(math.pi * V_c_eff / (2.0 * V_C_MAX_HOURS))
+
+    return damp * amp_quality * phase_quality
 
 
 # =========================================================================
@@ -160,20 +173,26 @@ def drift(t, y, params, aux):
     V_c = p['V_c']
     C_eff = math.sin(2.0 * math.pi * (t - V_c) / 24.0 + PHI_MORNING_TYPE)
 
-    # Full sigmoid arguments — u_W uses the SHIFTED drive; u_Z is driven only
-    # through -gamma_3 * W (which inherits the shift via W's response).
-    u_W = -kappa * Zt + lam * C_eff + Vh + Vn - a + alpha_T * T
+    # Full sigmoid arguments — u_W uses the SHIFTED drive; u_Z is driven
+    # only through -gamma_3 * W (which inherits the shift via W's
+    # response).  V_h is NOT in u_W — it enters the model only through
+    # the entrainment-amplitude factor in E (anabolic via amplitude, not
+    # via the wakefulness drive).
+    u_W = -kappa * Zt + lam * C_eff + Vn - a + alpha_T * T
     u_Z = -gamma_3 * W - Vn + beta_Z * a
 
-    # Entrainment quality: amplitude × phase (V_c-aware).
-    mu_W_slow = Vh + Vn - a + alpha_T * T
-    mu_Z_slow = -Vn + beta_Z * a
-    sW = float(_sigmoid(mu_W_slow))
-    sZ = float(_sigmoid(mu_Z_slow))
-    amp_quality = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
-    V_c_rad = 2.0 * math.pi * V_c / 24.0
-    phase_quality = max(math.cos(V_c_rad), 0.0)
-    E = amp_quality * phase_quality
+    # Entrainment quality: V_h-modulated amplitude × V_n damper × phase.
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + alpha_T * T
+    B_Z = -Vn + beta_Z * a
+    amp_W = float(_sigmoid(B_W + A_W) - _sigmoid(B_W - A_W))
+    amp_Z = float(_sigmoid(B_Z + A_Z) - _sigmoid(B_Z - A_Z))
+    amp_quality = amp_W * amp_Z
+    damp = math.exp(-Vn / p['V_n_scale'])
+    V_c_eff = min(abs(V_c), V_C_MAX_HOURS)
+    phase_quality = math.cos(math.pi * V_c_eff / (2.0 * V_C_MAX_HOURS))
+    E = damp * amp_quality * phase_quality
 
     mu_bifurc = mu_0 + mu_E * E  # Stuart-Landau bifurcation parameter
 
@@ -206,18 +225,23 @@ def drift_jax(t, y, args):
     C_ex = jnp.sin(2.0 * jnp.pi * t / 24.0 + PHI_MORNING_TYPE)       # external
     C_eff = jnp.sin(2.0 * jnp.pi * (t - V_c) / 24.0 + PHI_MORNING_TYPE)  # subject's
 
-    u_W = -p['kappa'] * Zt + p['lmbda'] * C_eff + Vh + Vn - a + p['alpha_T'] * T
+    # V_h is NOT in u_W — it enters the model only through the
+    # entrainment-amplitude factor in E.
+    u_W = -p['kappa'] * Zt + p['lmbda'] * C_eff + Vn - a + p['alpha_T'] * T
     u_Z = -p['gamma_3'] * W - Vn + p['beta_Z'] * a
 
-    # Entrainment quality: amplitude × phase (V_c-aware).
-    mu_W_slow = Vh + Vn - a + p['alpha_T'] * T
-    mu_Z_slow = -Vn + p['beta_Z'] * a
-    sW = jax.nn.sigmoid(mu_W_slow)
-    sZ = jax.nn.sigmoid(mu_Z_slow)
-    amp_quality = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
-    V_c_rad = 2.0 * jnp.pi * V_c / 24.0
-    phase_quality = jnp.maximum(jnp.cos(V_c_rad), 0.0)
-    E = amp_quality * phase_quality
+    # Entrainment quality: V_h-modulated amplitude × V_n damper × phase.
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + p['alpha_T'] * T
+    B_Z = -Vn + p['beta_Z'] * a
+    amp_W = jax.nn.sigmoid(B_W + A_W) - jax.nn.sigmoid(B_W - A_W)
+    amp_Z = jax.nn.sigmoid(B_Z + A_Z) - jax.nn.sigmoid(B_Z - A_Z)
+    amp_quality = amp_W * amp_Z
+    damp = jnp.exp(-Vn / p['V_n_scale'])
+    V_c_eff = jnp.minimum(jnp.abs(V_c), V_C_MAX_HOURS)
+    phase_quality = jnp.cos(jnp.pi * V_c_eff / (2.0 * V_C_MAX_HOURS))
+    E = damp * amp_quality * phase_quality
 
     mu_bifurc = p['mu_0'] + p['mu_E'] * E
 
@@ -537,6 +561,17 @@ PARAM_SET_A = {
     'tau_T':     48.0,
     'alpha_T':    0.3,
     'T_T':        0.0001,
+
+    # ── New entrainment-amplitude parameters (V_h-anabolic fix) ───────
+    # V_h enters the entrainment quality via amplitude:
+    #   A_W = lambda_amp_W * V_h,  A_Z = lambda_amp_Z * V_h
+    # Larger lambda_amp_* => V_h has stronger anabolic effect on T.
+    # Calibrated against the validation pipeline's gating tests.
+    'lambda_amp_W': 5.0,
+    'lambda_amp_Z': 8.0,
+    # V_n damper scale: damp(V_n) = exp(-V_n / V_n_scale).
+    # Smaller => V_n bites entrainment faster.
+    'V_n_scale':   2.0,
 
     # ── New 3-level ordinal sleep channel ────────────────────
     'delta_c':    1.5,    # c2 = c_tilde + delta_c; c1=3.0 -> c2=4.5 (deep threshold)

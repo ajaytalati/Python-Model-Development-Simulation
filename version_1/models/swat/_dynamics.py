@@ -40,63 +40,78 @@ A_SCALE = 6.0      # fixed scale constant for tilde-Z (same as 20p)
 import math as _math
 PHI_MORNING_TYPE = -_math.pi / 3.0
 
+# Clinical pathology threshold for the circadian phase shift.  Any
+# |V_c| >= V_C_MAX_HOURS collapses entrainment to zero.  A non-estimable
+# clinical constant (3 hours), not a tuneable parameter — included here
+# rather than in PARAM_PRIOR_CONFIG.
+V_C_MAX_HOURS = 3.0
+
 _STATE_NAMES = ('W', 'Zt', 'a', 'T', 'C', 'Vh', 'Vn')
 
 
 # =========================================================================
-# ENTRAINMENT QUALITY  (amplitude × phase, V_c-aware)
+# ENTRAINMENT QUALITY  (amplitude × phase × V_n damper, V_h-anabolic)
 # =========================================================================
 #
-# E combines two clinically distinct failure modes:
+# E combines three clinically distinct failure modes:
 #   (1) amplitude failure — slow pressures so imbalanced that the sigmoid
 #       is saturated and the sleep/wake flip-flop cannot alternate cleanly.
-#       Captured by the two 4*sigma(mu)*(1-sigma(mu)) factors.
-#   (2) phase-alignment failure — subject's rhythm shifted relative to the
-#       external light cycle (shift worker, jet lag).  Captured by the
-#       max(C_ext * C_eff, 0) factor: it swings daily but its TIME AVERAGE
-#       is cos(2π V_c / 24)_+ which is 1 at V_c=0, 0 at V_c=±6h, and
-#       negative (clipped to 0) beyond that.
+#       Captured by the (sigma(B+A) - sigma(B-A)) "clamped quarter-period"
+#       factor for each of W and Z, where A = lambda_amp * V_h modulates
+#       the entrainment amplitude (V_h-healthy => strong entrainment;
+#       V_h-depleted => collapse).
+#   (2) chronic-load damping — sustained high V_n smothers entrainment
+#       even with healthy V_h.  Captured by exp(-V_n / V_n_scale).
+#   (3) phase-alignment failure — subject's rhythm shifted relative to the
+#       external light cycle.  Captured by a clamped cosine on V_c that
+#       collapses to zero for |V_c| >= V_C_MAX_HOURS (clinical threshold).
 #
-# Multiplying the two yields the final E in [0, 1].  T evolves on
-# tau_T ≈ 48 h so it naturally low-passes the daily ripple from the phase
-# factor; the mean behaviour is what drives the bifurcation.
+# Multiplying the three yields the final E in [0, 1].  T evolves on
+# tau_T ~ 48 h so it naturally low-passes the daily ripple; the mean
+# behaviour is what drives the bifurcation.
 #
 # =========================================================================
 
 def entrainment_quality(y: Array, params: Array,
                         pi: Dict[str, int]) -> Array:
-    """Entrainment quality E(t) in [0, 1] — V_c-aware.
+    """Entrainment quality E(t) in [0, 1] — V_h-anabolic, V_n-catabolic.
 
-    Combines amplitude quality (slow-backdrop balance) with phase
-    alignment (subject's V_c shift vs external light cycle).  Phase
-    quality depends on V_c ONLY, not on t — no daily ripple.
+    Combines V_h-modulated amplitude quality, multiplicative V_n damper,
+    and clamped phase alignment.  All three factors depend on the slow
+    pressures only — no daily ripple — and multiply to give E in [0, 1].
     """
     a, T = y[2], y[3]
     Vh, Vn = y[5], y[6]
 
-    beta_Z  = params[pi['beta_Z']]
-    alpha_T = params[pi['alpha_T']]
-    V_c     = params[pi['V_c']]
+    beta_Z       = params[pi['beta_Z']]
+    alpha_T      = params[pi['alpha_T']]
+    V_c          = params[pi['V_c']]
+    lambda_amp_W = params[pi['lambda_amp_W']]
+    lambda_amp_Z = params[pi['lambda_amp_Z']]
+    V_n_scale    = params[pi['V_n_scale']]
 
-    # --- amplitude quality: can the flip-flop engage at all? ---
-    mu_W_slow = Vh + Vn - a + alpha_T * T
-    mu_Z_slow = -Vn + beta_Z * a
-    sW = jax.nn.sigmoid(mu_W_slow)
-    sZ = jax.nn.sigmoid(mu_Z_slow)
-    E_W = 4.0 * sW * (1.0 - sW)
-    E_Z = 4.0 * sZ * (1.0 - sZ)
-    amp_quality = E_W * E_Z
+    # --- amplitude quality: V_h-modulated clamped quarter-period ---
+    # A_W, A_Z = entrainment amplitude (V_h-driven; V_h=0 => no entrainment).
+    # B_W, B_Z = slow pressure backdrops (NO V_h here — V_h enters only
+    # through A_W, A_Z so it acts purely as an amplitude modulator).
+    A_W = lambda_amp_W * Vh
+    A_Z = lambda_amp_Z * Vh
+    B_W = Vn - a + alpha_T * T
+    B_Z = -Vn + beta_Z * a
+    amp_W = jax.nn.sigmoid(B_W + A_W) - jax.nn.sigmoid(B_W - A_W)
+    amp_Z = jax.nn.sigmoid(B_Z + A_Z) - jax.nn.sigmoid(B_Z - A_Z)
+    amp_quality = amp_W * amp_Z
 
-    # --- phase alignment: is subject's rhythm in sync with external light? ---
-    # Function of V_c ONLY (no daily ripple).  max(cos(2π V_c/24), 0):
-    #   V_c = 0h  -> 1.0 (aligned)
-    #   V_c = ±3h -> 0.707
-    #   V_c = ±6h -> 0.0  (shift worker)
-    #   V_c = ±12h -> 0.0 (full inversion; clipped by max)
-    V_c_rad = 2.0 * jnp.pi * V_c / 24.0
-    phase_quality = jnp.maximum(jnp.cos(V_c_rad), 0.0)
+    # --- chronic-load damper: high V_n smothers entrainment ---
+    damp = jnp.exp(-Vn / V_n_scale)
 
-    return amp_quality * phase_quality
+    # --- phase alignment: clamped cosine on V_c, zero past V_C_MAX ---
+    # cos(pi * |V_c|/(2*V_c_max)) -> 1.0 at V_c=0, 0 at |V_c|=V_C_MAX_HOURS.
+    # Beyond V_C_MAX_HOURS the value clamps to 0 (no negative leakage).
+    V_c_eff = jnp.minimum(jnp.abs(V_c), V_C_MAX_HOURS)
+    phase_quality = jnp.cos(jnp.pi * V_c_eff / (2.0 * V_C_MAX_HOURS))
+
+    return damp * amp_quality * phase_quality
 
 
 # =========================================================================
@@ -108,12 +123,13 @@ def compute_sigmoid_args(y: Array, t: Array, params: Array,
     """Compute u_W, u_Z at state y, time t.
 
     u_W uses the subject's SHIFTED circadian drive C_eff (shifted by V_c
-    hours from the external morning-type baseline).  u_Z has no direct
-    circadian term (unchanged from 20p); it inherits the shift through
-    the -gamma_3 * W feedback.
+    hours from the external morning-type baseline).  V_h is NOT in u_W
+    — it enters the model only through entrainment_quality (where it
+    modulates the entrainment amplitude).  u_Z has no direct circadian
+    term; it inherits the shift through the -gamma_3 * W feedback.
     """
     W, Zt, a, T = y[0], y[1], y[2], y[3]
-    Vh, Vn = y[5], y[6]
+    Vn = y[6]
 
     kappa   = params[pi['kappa']]
     lmbda   = params[pi['lmbda']]
@@ -125,7 +141,7 @@ def compute_sigmoid_args(y: Array, t: Array, params: Array,
     # Subject's shifted circadian drive
     C_eff = jnp.sin(2.0 * jnp.pi * (t - V_c) / 24.0 + PHI_MORNING_TYPE)
 
-    u_W = -kappa * Zt + lmbda * C_eff + Vh + Vn - a + alpha_T * T
+    u_W = -kappa * Zt + lmbda * C_eff + Vn - a + alpha_T * T
     u_Z = -gamma_3 * W - Vn + beta_Z * a
     return u_W, u_Z
 

@@ -51,21 +51,14 @@ def plot_swat(trajectory, t_grid, channel_outputs, params, save_dir):
 # ENTRAINMENT COMPUTATION  —  amplitude × phase form (PLOT-SIDE PROTOTYPE)
 # =========================================================================
 #
-# IMPORTANT: this plot-side entrainment formula is CURRENTLY DIFFERENT FROM
-# the one used inside the SDE dynamics (_dynamics.entrainment_quality,
-# simulation.drift, simulation.drift_jax).  The dynamics still use the old
-# instantaneous "slow backdrop" formula; the plot here shows the new
-# amplitude × phase measurement.
-#
-# This is a deliberate prototype-stage inconsistency.  Once the new formula
-# is confirmed to give clean basin discrimination on the plots, the dynamics
-# will be refactored to carry 24h running statistics so the same amplitude ×
-# phase quantity can drive mu(E) online.
-#
-# Until then, interpret entrainment.png panel 1 (E) as a diagnostic view of
-# the TRUE entrainment the patient is experiencing; panels 2-3 (mu, T)
-# still reflect the dynamics-side formula and may not exactly match the
-# plotted E.  Set-to-set discrimination should still be visible.
+# Two complementary entrainment views:
+#   - _compute_E (windowed):  diagnostic estimate of the patient's
+#     experienced entrainment from a 24-hour rolling amplitude+phase
+#     correlation.  Useful for visual inspection of pathology.
+#   - _compute_E_dynamics:    the closed-form E(t) actually driving
+#     mu(E) inside the SDE — V_h-anabolic amplitude × V_n damper × phase.
+#     Matches _dynamics.entrainment_quality and the inline expressions
+#     in simulation.drift / drift_jax.
 #
 # =========================================================================
 
@@ -137,13 +130,18 @@ def _compute_E_dynamics(trajectory, params):
 
     Matches _dynamics.entrainment_quality and the inline computation in
     simulation.drift / drift_jax:
-        amp_quality  = 4*sigma(mu_W_slow)*(1-sigma) * 4*sigma(mu_Z_slow)*(1-sigma)
-        phase_quality = max(cos(2*pi*V_c/24), 0)
-        E = amp_quality * phase_quality
+        A_W = lambda_amp_W * V_h,  A_Z = lambda_amp_Z * V_h
+        B_W = V_n - a + alpha_T * T
+        B_Z = -V_n + beta_Z * a
+        amp_W = sigma(B_W + A_W) - sigma(B_W - A_W)
+        amp_Z = sigma(B_Z + A_Z) - sigma(B_Z - A_Z)
+        damp  = exp(-V_n / V_n_scale)
+        phase = cos(pi * min(|V_c|, V_c_max) / (2 * V_c_max))     V_c_max = 3 h
+        E = damp * amp_W * amp_Z * phase
 
-    This is what appears in the bifurcation parameter mu(E) = mu_0 + mu_E * E.
-    It differs from _compute_E (windowed amplitude x phase-correlation from
-    the plot) because the dynamics needs something instantaneous and cheap.
+    V_h modulates entrainment amplitude (anabolic).  V_n appears both
+    inside the slow backdrop and as a multiplicative damper.  Phase
+    factor collapses to zero past |V_c| = 3 hours.
     """
     a  = trajectory[:, 2]
     T  = trajectory[:, 3]
@@ -151,15 +149,22 @@ def _compute_E_dynamics(trajectory, params):
     Vn = trajectory[:, 6]
     p = params
 
-    mu_W_slow = Vh + Vn - a + p['alpha_T'] * T
-    mu_Z_slow = -Vn + p['beta_Z'] * a
-    sW = 1.0 / (1.0 + np.exp(-mu_W_slow))
-    sZ = 1.0 / (1.0 + np.exp(-mu_Z_slow))
-    amp = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + p['alpha_T'] * T
+    B_Z = -Vn + p['beta_Z'] * a
+    sigma = lambda x: 1.0 / (1.0 + np.exp(-x))
+    amp_W = sigma(B_W + A_W) - sigma(B_W - A_W)
+    amp_Z = sigma(B_Z + A_Z) - sigma(B_Z - A_Z)
+    amp = amp_W * amp_Z
 
-    V_c_rad = 2.0 * np.pi * p['V_c'] / 24.0
-    phase = max(np.cos(V_c_rad), 0.0)
-    return amp * phase
+    damp = np.exp(-Vn / p['V_n_scale'])
+
+    V_c_max = 3.0
+    V_c_eff = min(abs(p['V_c']), V_c_max)
+    phase = np.cos(np.pi * V_c_eff / (2.0 * V_c_max))
+
+    return damp * amp * phase
 
 
 def _safe_corr(x, y):
