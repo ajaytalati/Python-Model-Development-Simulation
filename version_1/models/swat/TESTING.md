@@ -87,8 +87,10 @@ $$
 with sigmoid argument
 
 $$
-u_W(t) = \lambda\,C_{\text{eff}}(t) + V_h + V_n - a(t) - \kappa\,\tilde Z(t) + \alpha_T\,T(t).
+u_W(t) = \lambda\,C_{\text{eff}}(t) + V_n - a(t) - \kappa\,\tilde Z(t) + \alpha_T\,T(t).
 $$
+
+Note that $V_h$ does **not** appear in $u_W$. It enters the model through the entrainment-amplitude factor in $E_{\text{dyn}}$ (see §2.3) — anabolic on $T$ via amplitude rather than via the wake-promoting drive. This is the V_h-anabolic structural fix; the prior version of the spec had $V_h$ as a $+V_h$ term inside $u_W$ which made $V_h$ structurally catabolic on $T$.
 
 **Sleep depth** (unchanged from 20p):
 
@@ -124,10 +126,11 @@ Here $\sigma(u) = 1/(1 + e^{-u})$ and $B_W, B_Z, B_a, B_T$ are independent stand
 
 ### 2.3 Entrainment quality — dual formulation
 
-The entrainment quality $E(t) \in [0, 1]$ measures whether the patient's sleep/wake rhythm is **both deep enough** (clean alternation) **and properly phase-locked** to the external light/dark cycle. Two different failure modes exist:
+The entrainment quality $E(t) \in [0, 1]$ measures whether the patient's sleep/wake rhythm is **both deep enough** (clean alternation) **and properly phase-locked** to the external light/dark cycle. Three different failure modes exist:
 
-- **Amplitude failure** — patient stuck in one state (can't sleep, or can't wake). Measured by the spread of $W$ and $\tilde Z$.
-- **Phase-shift failure** — patient's rhythm mis-aligned with external light (shift work, jet lag). Measured against the parameter $V_c$ (phase shift in hours).
+- **Amplitude failure** — patient stuck in one state (can't sleep, or can't wake). Measured against $V_h$, which gates the entrainment amplitude (low $V_h$ ⇒ no entrainment).
+- **Chronic-load damping** — sustained high $V_n$ smothers entrainment even with healthy $V_h$, modelled by a multiplicative damper.
+- **Phase-shift failure** — patient's rhythm mis-aligned with external light (shift work, jet lag). Measured against $V_c$, with a clamped pathology threshold at $|V_c| \geq V_{c,\max}$ hours.
 
 **Two different formulas** for $E$ are needed — one cheap enough to run inside the SDE dynamics at every step, another that reflects the honest clinical measurement over a window of data. They are labelled $E_{\text{dyn}}$ and $E_{\text{obs}}$ and both appear in `entrainment.png` panel 1.
 
@@ -135,28 +138,53 @@ The entrainment quality $E(t) \in [0, 1]$ measures whether the patient's sleep/w
 
 This is what actually drives $\mu(E_{\text{dyn}}) = \mu_0 + \mu_E E_{\text{dyn}}$ inside the testosterone SDE. It is computed *instantaneously* from the current state $y(t)$ and the parameter $V_c$ — no windowing, no running statistics.
 
+The entrainment amplitude is $V_h$-driven:
+
 $$
-\text{amp}_W = 4\,\sigma(\mu_W^{\text{slow}})(1 - \sigma(\mu_W^{\text{slow}})), \qquad \mu_W^{\text{slow}} = V_h + V_n - a + \alpha_T T
-$$
-$$
-\text{amp}_Z = 4\,\sigma(\mu_Z^{\text{slow}})(1 - \sigma(\mu_Z^{\text{slow}})), \qquad \mu_Z^{\text{slow}} = -V_n + \beta_Z a
-$$
-$$
-\text{phase}(V_c) = \max\bigl(\cos(2\pi V_c / 24),\; 0\bigr)
-$$
-$$
-E_{\text{dyn}}(t) = \text{amp}_W \cdot \text{amp}_Z \cdot \text{phase}(V_c)
+A_W = \lambda_{\text{amp},W}\,V_h, \qquad A_Z = \lambda_{\text{amp},Z}\,V_h
 $$
 
-The phase factor depends on **$V_c$ only**, not on $t$ — a subject with $V_c = 6$ h has `phase = 0` *always*, not just when wake happens to fall on night-time. This avoids a spurious daily ripple in $\mu(E)$ that would confuse the slow $T$ dynamics.
+$$
+B_W = V_n - a + \alpha_T T, \qquad B_Z = -V_n + \beta_Z\,a
+$$
+
+$$
+\text{amp}_W = \sigma(B_W + A_W) - \sigma(B_W - A_W)
+$$
+
+$$
+\text{amp}_Z = \sigma(B_Z + A_Z) - \sigma(B_Z - A_Z)
+$$
+
+The chronic-load damper:
+
+$$
+\text{damp}(V_n) = e^{-V_n / V_{n,\text{scale}}}
+$$
+
+The phase factor (clamped at $V_{c,\max} = 3$ hours):
+
+$$
+\text{phase}(V_c) = \cos\!\left(\frac{\pi}{2}\,\frac{\min(|V_c|,\,V_{c,\max})}{V_{c,\max}}\right)
+$$
+
+Final:
+
+$$
+E_{\text{dyn}}(t) = \text{damp}(V_n)\,\cdot\,\text{amp}_W\,\cdot\,\text{amp}_Z\,\cdot\,\text{phase}(V_c)
+$$
+
+The phase factor depends on **$V_c$ only**, not on $t$ — a subject with $V_c = 6$ h has $\text{phase} = 0$ *always*. This avoids a spurious daily ripple in $\mu(E)$ that would confuse the slow $T$ dynamics.
 
 | $V_c$ (h) | phase factor | Interpretation |
 |:---:|:---:|:---|
 | 0 | 1.00 | Aligned with external light |
-| ±2 | 0.87 | Mild misalignment (early-morning or late-evening type) |
-| ±3 | 0.71 | Borderline pathological |
-| ±6 | 0.00 | Shift worker (6h off) |
-| ±12 | 0.00 | Fully inverted (clipped) |
+| ±1 | 0.87 | Mild misalignment |
+| ±2 | 0.50 | Marked misalignment (delayed/advanced sleep phase) |
+| ±3 | 0.00 | Clinical pathology threshold |
+| ±6 or more | 0.00 | Shift worker / inverted (clamped) |
+
+**Why the amplitude formula is shaped like this.** The clamped quarter-period form $\sigma(B+A) - \sigma(B-A)$ measures how much sigmoid response is available within an amplitude band of width $2A$ centred on the slow backdrop $B$. When $A$ (and therefore $V_h$) is zero, the band has zero width and amplitude is zero — depleted vitality means no rhythm, the clinically correct interpretation. When $A$ is large enough to span the sigmoid's transition region around $B$, the response is near $1$. The structural intuition: $V_h$ is the **gain** on the entrainment loop, not an additive offset to the wake drive.
 
 #### $E_{\text{obs}}(t)$ — the windowed diagnostic formula
 
@@ -182,7 +210,7 @@ This formula is a genuine rhythm measurement but needs 24 h of history. It's too
 
 $E_{\text{dyn}}$ is a cheap *proxy* for the windowed measurement. Its amplitude factor uses the slow-backdrop sigmoid balance (a point-in-time surrogate for "is the flip-flop likely to be swinging cleanly?"), which is generally higher than the actual observed amplitude because the sigmoid factor already assumes some fraction of time at each plateau.
 
-For a healthy subject (Set A) we see $E_{\text{dyn}} \approx 0.55$ and $E_{\text{obs}} \approx 0.20$ — different values, but both **above $E_{\text{crit}} = 0.5 / \mu_E$ relative scale** in the sense that both indicate "the system is working". For any pathological case (B, D), both go to near zero.
+For a healthy subject (Set A) we see $E_{\text{dyn}} \approx 1.0$ (clamped quarter-period saturates at $V_h \geq 1$) and $E_{\text{obs}} \approx 0.2$ — different scales, but both indicate "the system is working". For any pathological case (B, D), both go to near zero.
 
 Both curves are plotted on `entrainment.png` panel 1 (solid purple = $E_{\text{dyn}}$, dashed orange = $E_{\text{obs}}$). The clinician inspects:
 - $E_{\text{dyn}}$: what the model thinks is driving testosterone
@@ -194,7 +222,15 @@ Disagreement between them over many days is a signal that the model is mis-calib
 
 **Departure from the spec.** The spec document writes $E = \sigma(\kappa_E(\lambda^2 - \mu^2))$, a point-in-time function of instantaneous sigmoid arguments. With our parameter regime ($\lambda = 32$) that formula saturates at 1 and cannot discriminate basins. Both formulations above replace it.
 
-**The proof's Lyapunov argument.** Lemma 4.4 (sign of $\partial E / \partial T$) is now evaluated for $E_{\text{dyn}}$: $\partial E_{\text{dyn}}/\partial T = \partial \text{amp}_W / \partial T \cdot \text{amp}_Z \cdot \text{phase}$. The only $T$-dependent term is $\mu_W^{\text{slow}} = V_h + V_n - a + \alpha_T T$, so $\partial \text{amp}_W / \partial T = \alpha_T \cdot 4\sigma(\mu_W^{\text{slow}})(1-\sigma)(1-2\sigma)$. At the healthy equilibrium $\mu_W^{\text{slow}} \approx 1$ gives $\sigma \approx 0.73$ so $(1-2\sigma) < 0$ and therefore $\partial E_{\text{dyn}}/\partial T < 0$ — raising $T$ slightly *reduces* $E_{\text{dyn}}$, which is mildly stabilising. The Lyapunov bound $\dot{\mathcal{L}} \leq 0$ holds because the Stuart-Landau cubic dissipation dominates the weak $\alpha_T$ feedback.
+**The proof's Lyapunov argument.** Lemma 4.4 (sign of $\partial E_{\text{dyn}} / \partial T$) is now evaluated for the $V_h$-anabolic clamped quarter-period form. The only $T$-dependent term is $B_W = V_n - a + \alpha_T T$, so
+
+$$
+\frac{\partial \text{amp}_W}{\partial T}
+= \alpha_T\,\Bigl[\sigma'(B_W + A_W) - \sigma'(B_W - A_W)\Bigr]
+= \alpha_T\,\Bigl[\sigma_+(1-\sigma_+) - \sigma_-(1-\sigma_-)\Bigr],
+$$
+
+where $\sigma_\pm = \sigma(B_W \pm A_W)$. At the healthy equilibrium with $V_h \approx 1$, $A_W = \lambda_{\text{amp},W} \cdot 1 = 5$, $B_W \approx 1$, the derivative is small and signed by whether $|B_W + A_W| < |B_W - A_W|$ (it isn't here, since $B_W > 0$), so the sign is mildly *negative*: raising $T$ slightly *reduces* $E_{\text{dyn}}$, which is mildly stabilising — same qualitative conclusion as the previous spec, just via a different amplitude formula. The Lyapunov bound $\dot{\mathcal{L}} \leq 0$ holds because the Stuart-Landau cubic dissipation dominates the weak $\alpha_T$ feedback.
 
 ### 2.4 Deterministic components
 
@@ -258,7 +294,9 @@ For numerical verification we expect $\mathcal{L}(T(t))$ to be approximately mon
 
 ## 3. Parameter definitions
 
-Code-level accounting: **`PARAM_PRIOR_CONFIG` has 23 entries** (17 inherited + 6 new) and **`INIT_STATE_PRIOR_CONFIG` has 4 entries** (3 inherited + $T_0$). Total estimable scalars = 27.
+Code-level accounting: **`PARAM_PRIOR_CONFIG` has 26 entries** (17 inherited + 6 new T-block + 3 new entrainment-amplitude block from the V_h-anabolic structural fix) and **`INIT_STATE_PRIOR_CONFIG` has 4 entries** (3 inherited + $T_0$). Total estimable scalars = 30.
+
+Note: the code-level `PARAM_PRIOR_CONFIG` also contains the observation-channel parameters for the 3-level sleep, steps, and stress channels (delta_c, lambda_base, lambda_step, W_thresh, s_base, alpha_s, beta_s, sigma_s = 8 more entries). The count of 26 above refers to the latent-dynamics block; the runtime config has 34 in total.
 
 The spec's "24-parameter" count (per `Spec_24_Parameter_...md` §6) excludes the three inherited fast-noise temperatures $T_W, T_Z, T_a$, which the spec freezes in its identifiability analysis but the code estimates. Per spec §7.1: "if $T_W, T_Z, T_a$ are to be estimated, the count rises to 27."
 
@@ -296,20 +334,23 @@ Inherited from the 20p model except that slot #6 (originally the chronotype $\ph
 | 21 | $\tau_T$ | `tau_T` | Slow timescale of $T$ dynamics (hours). $\sim 48$h — intermediate between flip-flop (2h) and 7-day vitality. |
 | 22 | $T_T$ | `T_T` | Process-noise temperature for $T$. |
 
-### 3.3 New coupling parameter (1)
+### 3.3 New coupling and entrainment-amplitude parameters (4)
 
 | # | Symbol | Code name | Meaning |
 |:---:|:---:|:---:|:---|
 | 23 | $\alpha_T$ | `alpha_T` | Strength with which $T$ promotes wakefulness via the $+\alpha_T T$ term in $u_W$. Expected positive. |
+| 24 | $\lambda_{\text{amp},W}$ | `lambda_amp_W` | $V_h$ gain into the W-side entrainment amplitude: $A_W = \lambda_{\text{amp},W}\,V_h$. Expected positive. Default 5.0 — gives saturated $\text{amp}_W \approx 1$ across the daily $B_W$ cycle at healthy $V_h = 1$. |
+| 25 | $\lambda_{\text{amp},Z}$ | `lambda_amp_Z` | $V_h$ gain into the Z-side entrainment amplitude: $A_Z = \lambda_{\text{amp},Z}\,V_h$. Expected positive. Default 8.0 — larger because $\beta_Z\,a$ can reach ~4, so $A_Z$ must dominate. |
+| 26 | $V_{n,\text{scale}}$ | `V_n_scale` | Damper scale for the chronic-load multiplicative factor: $\text{damp}(V_n) = e^{-V_n / V_{n,\text{scale}}}$. Default 2.0 — gives $\text{damp}(0) = 1$, $\text{damp}(2) = 0.37$, $\text{damp}(5) = 0.08$. |
 
 ### 3.4 Initial conditions (4)
 
 | # | Symbol | Code name | Meaning |
 |:---:|:---:|:---:|:---|
-| 24 | $W_0$ | `W_0` | Wakefulness at $t = 0$ (inherited). |
-| 25 | $\tilde Z_0$ | `Zt_0` | Rescaled sleep depth at $t = 0$ (inherited). |
-| 26 | $a_0$ | `a_0` | Adenosine at $t = 0$ (inherited). |
-| 27 | $T_0$ | `T_0` | Testosterone amplitude at $t = 0$. New. |
+| 27 | $W_0$ | `W_0` | Wakefulness at $t = 0$ (inherited). |
+| 28 | $\tilde Z_0$ | `Zt_0` | Rescaled sleep depth at $t = 0$ (inherited). |
+| 29 | $a_0$ | `a_0` | Adenosine at $t = 0$ (inherited). |
+| 30 | $T_0$ | `T_0` | Testosterone amplitude at $t = 0$. New. |
 
 ### 3.5 Frozen quantities (not estimated)
 
@@ -318,10 +359,22 @@ Inherited from the 20p model except that slot #6 (originally the chronotype $\ph
 | $A$ (`A_SCALE`) | 6.0 | Rescaling of $\tilde Z$; inherited |
 | $\phi_0$ (`PHI_MORNING_TYPE`) | $-\pi/3$ | Morning-type baseline circadian phase. Replaces the estimable chronotype $\phi$ from the 20p model. Clinical premise: all healthy rhythms peak in the morning; shifts from this baseline are pathological and measured by $V_c$. |
 | Wake-side $a$ coefficient | $-1$ | Gauge-fixing inherited from 17-param identifiability proof |
+| $V_{c,\max}$ (`V_C_MAX_HOURS`) | 3.0 | Clinical pathology threshold for the phase shift. Any $|V_c| \geq V_{c,\max}$ collapses the phase factor in $E_{\text{dyn}}$ to zero. Not estimable from clinical data — chosen by the clinical interpretation that even moderate phase shifts (3+ hour shift workers, transmeridian travellers) are pathological. |
 
 ---
 
 ## 4. Parameter sets for testing
+
+> **Note on the V_h-anabolic structural fix.** Sections 4.1 and 4.5 below
+> have been updated to reflect the corrected entrainment formula
+> (V_h-anabolic clamped quarter-period + V_n damper + clamped phase).
+> The Set-B and Set-D walkthroughs in 4.2 and 4.4 still narrate the
+> prior slow-backdrop math; the corrected formula gives slightly
+> different intermediate values but the same headline T-end outcomes
+> (B: 0.108 vs old 0.12; D: 0.107 vs old 0.11) — the math walkthroughs
+> in 4.2/4.4 are flagged for a follow-up edit. The set parameter
+> tables (V_h, V_n, V_c, T_0) and the qualitative conclusions are
+> unchanged.
 
 ### 4.1 Set A — healthy basin
 
@@ -349,31 +402,48 @@ Same as 20p Set A for the inherited 17 parameters, with the new T-block paramete
 
 Simulation length: **14 days** (longer than 20p's 7d so that $\tau_T = 48$h is observed at least 7 times — required by (R3') of the identifiability proof). Grid: $dt = 5$ minutes.
 
-**Expected entrainment quality and equilibrium (Set A).** With healthy $V_h = 1.0$, $V_n = 0.3$, typical $a \approx 0.5$, $T \approx 0.6$, $V_c = 0$:
+**Expected entrainment quality and equilibrium (Set A).** With healthy $V_h = 1.0$, $V_n = 0.3$, typical $a \approx 0.5$, $T \approx 0.9$, $V_c = 0$, and the deployed $\lambda_{\text{amp},W} = 5$, $\lambda_{\text{amp},Z} = 8$, $V_{n,\text{scale}} = 2$:
 
 $$
-\mu_W^{\text{slow}} = 1.0 + 0.3 - 0.5 + 0.3 \cdot 0.6 = 0.98, \quad \mu_Z^{\text{slow}} = -0.3 + 2.5 \cdot 0.5 = 0.95
-$$
-
-$$
-\text{amp}_W = 4\sigma(0.98)(1-\sigma) \approx 0.81, \quad \text{amp}_Z = 4\sigma(0.95)(1-\sigma) \approx 0.82
+A_W = 5 \cdot 1.0 = 5, \qquad A_Z = 8 \cdot 1.0 = 8
 $$
 
 $$
-\text{phase}(V_c=0) = \max(\cos(0), 0) = 1.0
+B_W = 0.3 - 0.5 + 0.3 \cdot 0.9 = 0.07, \qquad B_Z = -0.3 + 2.5 \cdot 0.5 = 0.95
 $$
 
-so $E_{\text{dyn}} \approx 0.81 \cdot 0.82 \cdot 1.0 \approx 0.66$ at the instantaneous healthy point, and SDE-average $E_{\text{dyn}}$ comes out somewhat lower (~0.55) because $a$ and $T$ fluctuate. The windowed $E_{\text{obs}}$ is more stringent and sits around 0.20 due to noise in the 24-h correlation.
-
-Then $\mu(E_{\text{dyn}}) \approx -0.5 + 1.0 \cdot 0.55 = +0.05$, giving the testosterone equilibrium
+The clamped quarter-period sigmoid differences are essentially saturated:
 
 $$
-T^\star = \sqrt{\mu(E_{\text{dyn}})/\eta} \approx \sqrt{0.05/0.5} \approx 0.32 \ldots \sqrt{0.16/0.5} \approx 0.57
+\text{amp}_W = \sigma(5.07) - \sigma(-4.93) \approx 0.994 - 0.007 = 0.987
+$$
+$$
+\text{amp}_Z = \sigma(8.95) - \sigma(-7.05) \approx 1.000 - 0.001 = 0.999
 $$
 
-depending on instantaneous $E_{\text{dyn}}$. The actual last-day mean comes out ~0.58.
+The chronic-load damper:
 
-**Bifurcation threshold.** $E_{\mathrm{crit}} = -\mu_0 / \mu_E = 0.5$. Set A's realised $E_{\text{dyn}} \approx 0.55$ sits just above this — healthy equilibrium. Set B's realised $E_{\text{dyn}} \approx 0.035$ sits well below — collapse. Set D's realised $E_{\text{dyn}} = 0.00$ sits at the floor — full collapse.
+$$
+\text{damp}(0.3) = e^{-0.3/2} \approx 0.861
+$$
+
+and $\text{phase}(0) = 1$, so
+
+$$
+E_{\text{dyn}} \approx 0.987 \cdot 0.999 \cdot 0.861 \cdot 1.0 \approx 0.85
+$$
+
+The SDE-averaged $E_{\text{dyn}}$ stays close to this because the slow backdrop $B_W$ stays small enough that the amplitude factor remains saturated.
+
+Then $\mu(E_{\text{dyn}}) \approx -0.5 + 1.0 \cdot 0.85 = 0.35$, giving the testosterone equilibrium
+
+$$
+T^\star = \sqrt{\mu(E_{\text{dyn}})/\eta} \approx \sqrt{0.35/0.5} \approx 0.84
+$$
+
+The actual last-day mean comes out ~0.90 (slightly above $T^\star$ because $B_W$ varies and momentarily pushes $\text{amp}_W$ above the steady-state value during fast-flip transitions).
+
+**Bifurcation threshold.** $E_{\mathrm{crit}} = -\mu_0 / \mu_E = 0.5$. Set A's realised $E_{\text{dyn}} \approx 0.85$ sits well above this — healthy equilibrium. Set B's realised $E_{\text{dyn}} \approx 0.005$ sits at the floor — full collapse. Set D's realised $E_{\text{dyn}} = 0$ sits at the floor too — full phase-collapse.
 
 ### 4.2 Set B — pathological basin
 
@@ -450,16 +520,18 @@ This demonstrates:
 
 ### 4.5 Summary — the four-scenario picture
 
+Numerical values from running the four canonical scenarios for 14 days under the corrected dynamics (`PYTHONPATH=. python models/swat/verify_swat_state.py` from `version_1/`, seed=42):
+
 | Set | Scenario | $V_h$ | $V_n$ | $V_c$ | $T_0$ | $T$ end | $E_{\text{dyn}}$ mean | $\mu$ mean |
 |:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| A | Healthy | 1.0 | 0.3 | 0 | **0.5** | 0.56 | 0.55 | +0.05 |
-| B | Severe insomnia | 0.2 | **3.5** | 0 | **0.5** | **0.12** | 0.025 | −0.47 |
-| C | Recovery from flatline | 1.0 | 0.3 | 0 | **0.05** | 0.42 | 0.55 | +0.05 |
+| A | Healthy | 1.0 | 0.3 | 0 | **0.5** | **0.90** | ~0.85 | +0.35 |
+| B | Severe insomnia | 0.2 | **3.5** | 0 | **0.5** | **0.11** | ~0.005 | −0.50 |
+| C | Recovery from flatline | 1.0 | 0.3 | 0 | **0.05** | **0.82** | ~0.85 | +0.35 |
 | D | Shift worker | 1.0 | 0.3 | **6.0** | **0.5** | **0.11** | 0.00 | −0.50 |
 
-All non-recovery scenarios start at $T_0 = 0.5$ — near the healthy equilibrium $T^\star \approx 0.55$ and physically plausible (starting at $T_0 = 1.0$ would require the subject to be at supra-physiological pulsatility amplitude). Set C is the exception: $T_0 = 0.05$ is the pathological flatline we're modelling recovery from.
+All non-recovery scenarios start at $T_0 = 0.5$ — well below the healthy equilibrium $T^\star \approx 0.9$ but physically plausible. The healthy run is what shows the rise from $T_0 = 0.5$ to the $T^\star$ neighbourhood. Set C demonstrates recovery from a deeper starting pathology ($T_0 = 0.05$).
 
-The symmetry between B/D (healthy → pathology) and C (pathology → healthy) is the key validation. Same model, opposite trajectory signs.
+The discrimination ratios are sharp under the corrected model: A:B ≈ 8.3×, A:D ≈ 8.4×. The symmetry between B/D (healthy → pathology) and C (pathology → healthy) is the key validation: same model, opposite trajectory signs.
 
 ---
 
@@ -477,9 +549,11 @@ python -c "from models.swat.simulation import SWAT_MODEL; from models.swat.estim
 
 ```
 sim: swat v1.0
-est: swat n_dim = 27 ( 23 params + 4 init )
+est: swat n_dim = 30 ( 26 params + 4 init )
 n_states = 7 , n_stochastic = 4
 ```
+
+(The code-level `PARAM_PRIOR_CONFIG` includes 8 additional observation-channel parameters not counted in the latent-dynamics block of 26; `n_dim` reported here is the latent-dynamics + initial-conditions count. Regenerate this expected output if the count drifts.)
 
 If this fails, fix the import before any later test. Most likely root causes: missing `__init__.py`; `models.swat.sim_plots` not importable; one of the new keys missing from `PARAM_PRIOR_CONFIG`.
 
@@ -509,23 +583,23 @@ Add `--scipy` if Diffrax unavailable. Output goes to `outputs/synthetic_swat_A_<
 | $W$ trajectory | Alternates between ~0.9 (wake) and ~0.1 (sleep), switching twice per 24h, with ~30-min transitions |
 | $\tilde Z$ trajectory | Anti-correlated with $W$; low (~0) when awake, peak ~2.2–3.5 when asleep |
 | $a$ trajectory | Low-passed $W$; rises during wake, decays during sleep with timescale ~3h |
-| **$T$ trajectory** | **Stays in $[0.45, 0.65]$ throughout. Starts at $T_0 = 0.5$ (physically plausible, near $T^\star$) — no large initial transient** |
+| **$T$ trajectory** | **Rises from $T_0 = 0.5$ to ~0.90 over the first ~5 days, then stays near $T^\star \approx 0.9$** |
 | $C$ trajectory | Clean 24-h sinusoid of unit amplitude |
 | $V_h, V_n$ panel | Horizontal lines at 1.0 and 0.3; plot title contains **"healthy"** |
-| **`entrainment.png` panel 1** | **$E_{\text{dyn}}$ (solid purple) around 0.55 from day 1 onward (above $E_{\mathrm{crit}} = 0.5$); $E_{\text{obs}}$ (dashed orange) around 0.20. Both below-threshold on day 0 (partial window)** |
-| **`entrainment.png` panel 2** | **$\mu(E_{\text{dyn}}) \approx +0.05$, predominantly green-shaded (above zero)** |
-| **`entrainment.png` panel 3** | **Red trajectory $T(t)$ tracks dashed green $T^\star \approx 0.55$ closely — no large initial transient since $T_0 = 0.5$ is already near equilibrium** |
+| **`entrainment.png` panel 1** | **$E_{\text{dyn}}$ (solid purple) around 0.85 from day 1 onward (well above $E_{\mathrm{crit}} = 0.5$); $E_{\text{obs}}$ (dashed orange) around 0.20** |
+| **`entrainment.png` panel 2** | **$\mu(E_{\text{dyn}}) \approx +0.35$, predominantly green-shaded (above zero)** |
+| **`entrainment.png` panel 3** | **Red trajectory $T(t)$ rises toward dashed green $T^\star \approx 0.84$ over the first 5 days, then tracks it** |
 
 **Quantitative checks:**
 
 | Check | Expected | Tolerance | Notes |
 |:---:|:---:|:---:|:---|
 | Mean HR (asleep) | ~52.5 bpm | ±5 bpm | $\mathrm{HR}_\mathrm{base} + \alpha_\mathrm{HR} \cdot W_\mathrm{sleep}$ + small $\alpha_T T$ effect |
-| Mean HR (awake) | ~75 bpm | ±5 bpm | Slightly higher than 20p's 72.5 because $+\alpha_T T \approx 0.15$ adds to $u_W$ |
-| Sleep fraction | 0.30–0.45 | — | Higher than 20p's 0.25 because $c_\mathrm{tilde}$ is now 3.0 with $\mathrm{Zt}_\mathrm{peak}$ ~5 |
-| **Mean $T$ (after day 2)** | **~0.65** | ±0.15 | **Settles near $T^\star = \sqrt{\mu/\eta}$ for $\mu \approx 0.05$** |
+| Mean HR (awake) | ~75 bpm | ±5 bpm | Slightly higher than 20p's 72.5 because $+\alpha_T T$ adds to $u_W$ |
+| Sleep fraction | 0.30–0.45 | — | Within clinical target band; depends on $c_\mathrm{tilde}$ |
+| **Mean $T$ (after day 5)** | **~0.90** | ±0.10 | **Settles near $T^\star = \sqrt{\mu/\eta}$ for $\mu \approx 0.35$** |
 | **Std of $T$** | **< 0.15** | — | **$T_T = 10^{-4}$ keeps noise small on slow timescale** |
-| **Mean $E_{\text{dyn}}$** | **~0.55** | ±0.10 | **Dynamics-side, day ≥ 1** |
+| **Mean $E_{\text{dyn}}$** | **~0.85** | ±0.10 | **Dynamics-side, day ≥ 1; clamped quarter-period saturates** |
 | **Mean $E_{\text{obs}}$** | **~0.20** | ±0.10 | **Windowed diagnostic, day ≥ 1** |
 | `verify_physics_fn` → `W_range` | > 0.7 | — | |
 | `verify_physics_fn` → `Zt_range` | > 3.5 | — | Higher than 20p's 2.0 because of `c_tilde`/`beta_Z` fix |
