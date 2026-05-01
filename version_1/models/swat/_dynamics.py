@@ -70,43 +70,60 @@ _STATE_NAMES = ('W', 'Zt', 'a', 'T', 'C', 'Vh', 'Vn')
 
 def entrainment_quality(y: Array, params: Array,
                         pi: Dict[str, int]) -> Array:
-    """Entrainment quality E(t) in [0, 1] — POLARITY alignment of W
-    and Zt with the EXTERNAL circadian cycle.
+    """Entrainment quality E(t) in [0, 1] — V_h-anabolic fix formula.
 
-    Redesigned 2026-05-01 (Phase 3.6): the previous "amp_quality"
-    formula 4σ(1-σ) measured TRANSITION ACTIVITY (peaked at the
-    sleep-wake threshold), which is BACKWARDS from the physiological
-    notion of entrainment. A subject who is wake during the day and
-    deeply asleep at night IS perfectly entrained — E should be ~1
-    sustained, not flip-flopping with daily transitions.
+    Direct JAX port of the reference implementation in
+    `swat_entrainment_docs/entrainment_model.py` (the "PR #11" V_h-
+    anabolic structural fix). See `swat_entrainment_docs/01_formula.md`
+    § "The full formula" for the end-to-end derivation.
 
-    Formulation:
-        E_W  = sigmoid(K_align · (2W  - 1) ·   C_ext )
-        E_Zt = sigmoid(K_align · (2Zt - 1) · (-C_ext))
-        E    = E_W · E_Zt
+        A_W   = lambda_amp_W · V_h            (band half-width on W)
+        A_Z   = lambda_amp_Z · V_h            (band half-width on Z)
+        B_W   = V_n − a + alpha_T · T          (band centre — NO V_h)
+        B_Z   = -V_n + beta_Z · a              (band centre — NO V_h)
+        amp_W = sigmoid(B_W + A_W) − sigmoid(B_W − A_W)
+        amp_Z = sigmoid(B_Z + A_Z) − sigmoid(B_Z − A_Z)
+        damp  = exp(-V_n / V_n_scale)
+        phase = cos(π · min(|V_c|, V_c_max) / (2 · V_c_max))
+        E_dyn = damp · amp_W · amp_Z · phase
 
-    Each factor is high when the state is on the SAME side of its
-    midpoint (0.5) as C is of 0. Polarity-based, not shape-based:
-    a subject whose W jumps sharply between 0 and 1 in sync with
-    C's sign gets E ≈ 1 sustained, even though shape-alignment
-    `1 - 4·(W - (1+C)/2)²` would penalise the sharpness.
+    The formula depends ONLY on slow states (a, T) and controls
+    (V_h, V_n, V_c) — NOT on instantaneous W, Zt, or C(t). So E_dyn
+    is structurally non-oscillating within a day; a healthy patient
+    sits sustainedly at ≈ 0.85 (V_n=0.3) or ≈ 0.98 (V_n=0).
 
-    V_c phase-shift naturally degrades alignment because subject's W
-    follows C_eff (V_c-shifted internal drive) but the polarity
-    check uses EXTERNAL C — no separate phase_quality factor needed.
-
-    K_align = 8 by default — sharp enough to give E ≈ 1 at clear
-    polarity, smoothly fading to 0 as C crosses zero (twilight).
+    Sanity values (a=0.5, T=0.85; see swat_entrainment_docs/02_components.md):
+        Healthy V_h=1, V_n=0.3, V_c=0:    E ≈ 0.8476
+        V_h depleted V_h=0.2, V_n=0.3:    E ≈ 0.1747
+        V_n high V_h=1, V_n=3.5:          E ≈ 0.1477
+        Phase shift V_c=1h:               E ≈ 0.7340
+        Phase shift V_c=2h:               E ≈ 0.4238
+        Phase shift V_c≥3h (clamp):       E = 0.0000
     """
-    del pi
-    del params
-    W, Zt, C = y[0], y[1], y[4]
-    K_ALIGN = 16.0   # sharper polarity check → E ≈ 1 outside the brief
-                      # twilight C-crossings; raised from 8 so healthy E_avg
-                      # sits ~0.85 instead of ~0.7.
-    E_W  = jax.nn.sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C)
-    E_Zt = jax.nn.sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C))
-    return E_W * E_Zt
+    a, T = y[2], y[3]
+    Vh, Vn = y[5], y[6]
+
+    alpha_T      = params[pi['alpha_T']]
+    beta_Z       = params[pi['beta_Z']]
+    lambda_amp_W = params[pi['lambda_amp_W']]
+    lambda_amp_Z = params[pi['lambda_amp_Z']]
+    V_n_scale    = params[pi['V_n_scale']]
+    V_c_max      = params[pi['V_c_max']]
+    V_c          = params[pi['V_c']]
+
+    A_W = lambda_amp_W * Vh
+    A_Z = lambda_amp_Z * Vh
+    B_W = Vn - a + alpha_T * T
+    B_Z = -Vn + beta_Z * a
+
+    amp_W = jax.nn.sigmoid(B_W + A_W) - jax.nn.sigmoid(B_W - A_W)
+    amp_Z = jax.nn.sigmoid(B_Z + A_Z) - jax.nn.sigmoid(B_Z - A_Z)
+    damp  = jnp.exp(-Vn / V_n_scale)
+
+    V_c_eff = jnp.minimum(jnp.abs(V_c), V_c_max)
+    phase   = jnp.cos(jnp.pi * V_c_eff / (2.0 * V_c_max))
+
+    return damp * amp_W * amp_Z * phase
 
 
 # =========================================================================

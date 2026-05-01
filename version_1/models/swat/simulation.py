@@ -114,39 +114,56 @@ def circadian_jax(t, params):
     return jnp.sin(2.0 * jnp.pi * t / 24.0 + PHI_MORNING_TYPE)
 
 
-def entrainment_quality(W, Zt, a, T, Vh, Vn, params, C=None):
-    """Alignment-based entrainment quality E in [0, 1].
+def entrainment_quality(W, Zt, a, T, Vh, Vn, params):
+    """V_h-anabolic entrainment quality E in [0, 1] — port of the
+    documented reference (PR #11).
 
-    Redesigned 2026-05-01 (Phase 3.6) per user feedback that the
-    previous flip-flop-engagement formula was structurally backwards:
-    a subject who is awake during the day and deep asleep at night
-    IS perfectly entrained — E should be ~1 sustained, not flip-
-    flopping at the wake↔sleep transitions.
+    Mathematically identical to:
+      `swat_entrainment_docs/entrainment_model.py:entrainment_quality`
+      `_dynamics.entrainment_quality(y, params, pi)`
 
-    The new formula measures alignment of W and Zt with their
-    EXTERNAL circadian targets:
-        target_W(t)  = (1 + C(t)) / 2   — high during day
-        target_Zt(t) = (1 - C(t)) / 2   — high during night
-        E = max(0, 1 - 4·(W - target_W)²) · max(0, 1 - 4·(Zt - target_Zt)²)
+        A_W   = lambda_amp_W · V_h
+        A_Z   = lambda_amp_Z · V_h
+        B_W   = V_n − a + alpha_T · T
+        B_Z   = -V_n + beta_Z · a
+        amp_W = sigma(B_W + A_W) − sigma(B_W − A_W)
+        amp_Z = sigma(B_Z + A_Z) − sigma(B_Z − A_Z)
+        damp  = exp(-V_n / V_n_scale)
+        phase = cos(π · min(|V_c|, V_c_max) / (2 · V_c_max))
+        E_dyn = damp · amp_W · amp_Z · phase
 
-    V_c degrades alignment automatically because the subject's W
-    follows the V_c-shifted internal drive C_eff, but the target
-    uses the EXTERNAL pacemaker C — no separate phase_quality
-    factor needed.
+    Sanity values from `swat_entrainment_docs/02_components.md` §
+    "Sanity checks" (a=0.5, T=0.85):
 
-    a, T, Vh, Vn retained for backwards-compatible signature but
-    no longer used. Callers that pass C explicitly get the proper
-    alignment; callers that pass C=None default to C=0 (a coarse
-    fallback for callers that don't carry the pacemaker state, e.g.
-    cycle-averaged identifiability scripts).
+        Healthy V_h=1, V_n=0.3, V_c=0:    E ≈ 0.8476
+        V_h depleted V_h=0.2, V_n=0.3:    E ≈ 0.1747
+        V_n high V_h=1, V_n=3.5:          E ≈ 0.1477
+        Phase shift V_c=1h:               E ≈ 0.7340
+        Phase shift V_c=2h:               E ≈ 0.4238
+        Phase shift V_c≥3h (clamp):       E = 0.0000
+
+    W, Zt accepted for API consistency with the channel DAG but
+    unused — the formula reads only the slow states (a, T) and the
+    controls (V_h, V_n, V_c). This is by design (see tutorial
+    § "What goes into and comes out of the formula").
     """
-    del a, T, Vh, Vn, params
-    if C is None:
-        C = 0.0
-    K_ALIGN = 16.0
-    E_W  = float(_sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C))
-    E_Zt = float(_sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C)))
-    return E_W * E_Zt
+    del W, Zt
+    p = params
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + p['alpha_T'] * T
+    B_Z = -Vn + p['beta_Z'] * a
+
+    amp_W = float(_sigmoid(B_W + A_W)) - float(_sigmoid(B_W - A_W))
+    amp_Z = float(_sigmoid(B_Z + A_Z)) - float(_sigmoid(B_Z - A_Z))
+    damp  = math.exp(-Vn / p['V_n_scale'])
+
+    V_c = p['V_c']
+    V_c_max = p['V_c_max']
+    V_c_eff = min(abs(V_c), V_c_max)
+    phase = math.cos(math.pi * V_c_eff / (2.0 * V_c_max))
+
+    return damp * amp_W * amp_Z * phase
 
 
 # =========================================================================
@@ -180,13 +197,21 @@ def drift(t, y, params, aux):
     u_W = -kappa * Zt + lam * C_eff + Vh + Vn - a + alpha_T * T
     u_Z = -gamma_3 * W - Vn + beta_Z * a
 
-    # Entrainment quality: POLARITY alignment of W and Zt with the
-    # EXTERNAL circadian C. See _dynamics.entrainment_quality() docstring
-    # for full rationale.
-    K_ALIGN = 16.0
-    E_W  = float(_sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C_exact))
-    E_Zt = float(_sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C_exact)))
-    E = E_W * E_Zt
+    # Entrainment quality: V_h-anabolic formula per
+    # swat_entrainment_docs/01_formula.md. Depends only on slow states
+    # (a, T) and controls (V_h, V_n, V_c) — NOT on instantaneous W,
+    # Zt, or C. Structurally non-oscillating; healthy ≈ 0.85 sustained.
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + alpha_T * T
+    B_Z = -Vn + beta_Z * a
+    amp_W = float(_sigmoid(B_W + A_W)) - float(_sigmoid(B_W - A_W))
+    amp_Z = float(_sigmoid(B_Z + A_Z)) - float(_sigmoid(B_Z - A_Z))
+    damp = math.exp(-Vn / p['V_n_scale'])
+    V_c_max = p['V_c_max']
+    V_c_eff = min(abs(V_c), V_c_max)
+    phase = math.cos(math.pi * V_c_eff / (2.0 * V_c_max))
+    E = damp * amp_W * amp_Z * phase
 
     mu_bifurc = mu_0 + mu_E * E  # Stuart-Landau bifurcation parameter
 
@@ -222,11 +247,18 @@ def drift_jax(t, y, args):
     u_W = -p['kappa'] * Zt + p['lmbda'] * C_eff + Vh + Vn - a + p['alpha_T'] * T
     u_Z = -p['gamma_3'] * W - Vn + p['beta_Z'] * a
 
-    # POLARITY alignment of W, Zt with EXTERNAL C (see _dynamics docstring).
-    K_ALIGN = 16.0
-    E_W  = jax.nn.sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C_ex)
-    E_Zt = jax.nn.sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C_ex))
-    E = E_W * E_Zt
+    # V_h-anabolic entrainment per swat_entrainment_docs/01_formula.md.
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + p['alpha_T'] * T
+    B_Z = -Vn + p['beta_Z'] * a
+    amp_W = jax.nn.sigmoid(B_W + A_W) - jax.nn.sigmoid(B_W - A_W)
+    amp_Z = jax.nn.sigmoid(B_Z + A_Z) - jax.nn.sigmoid(B_Z - A_Z)
+    damp = jnp.exp(-Vn / p['V_n_scale'])
+    V_c_max = p['V_c_max']
+    V_c_eff = jnp.minimum(jnp.abs(V_c), V_c_max)
+    phase = jnp.cos(jnp.pi * V_c_eff / (2.0 * V_c_max))
+    E = damp * amp_W * amp_Z * phase
 
     mu_bifurc = p['mu_0'] + p['mu_E'] * E
 
@@ -624,18 +656,12 @@ PARAM_SET_A = {
     #   c_tilde  (wake → light): 2.5 / 6 ≈ 0.417
     #   delta_c  (light → deep): 1.5 / 6 = 0.25  → c2 = 0.667
     'c_tilde':    0.417,
-    # tau_a 3h → 5h (2026-05-01) — slower adenosine drain keeps the
-    # (a → u_Z → Zt) coupling pumping Zt up through the full overnight
-    # period, increasing sleep depth as requested. With tau_a=3h and
-    # 8h of sleep, a drains by exp(-8/3) ≈ 7%, dropping Zt steeply
-    # toward the end of the night; tau_a=5h gives ~20% retained drive
-    # at end-of-night.
-    'tau_a':      5.0,
-    # beta_Z 4 → 6 (2026-05-01) — stronger (a → Zt) coupling so the
-    # nighttime Zt saturates higher. With a≈0.5 in mid-night and
-    # beta_Z=6, sigmoid(3.0) ≈ 0.95 vs old beta_Z=4 → sigmoid(2.0)
-    # ≈ 0.88 — Zt now sits closer to the [0, 1] ceiling for longer.
-    'beta_Z':     6.0,
+    # tau_a, beta_Z restored 2026-05-01 to the documented defaults
+    # (per swat_entrainment_docs/README.md "At a glance" table). My
+    # earlier "deeper sleep" tweak (tau_a=5, beta_Z=6) is reverted —
+    # the V_h-anabolic entrainment formula doesn't need them inflated.
+    'tau_a':      3.0,
+    'beta_Z':     4.0,
     'T_W':        0.01,
     # T_Z 0.05 unchanged in raw value — the rescale of Zt to [0, 1] makes
     # the per-bin Jacobi-noise step smaller automatically (sqrt(Z*(1-Z))
@@ -646,20 +672,28 @@ PARAM_SET_A = {
     'T_a':        0.01,
 
     # ── Stuart-Landau testosterone block ───────────
-    # Tuning 2026-05-01 (Phase 3.6 — alignment-based entrainment):
-    #   mu_0 -0.3 → -0.85 — with the new alignment formula a healthy
-    #     subject has E ≈ 1 sustained, so mu = mu_0 + mu_E·E ≈ +0.15
-    #     gives T* = sqrt(0.15/0.5) ≈ 0.55 (the spec target). Set B
-    #     and D collapse because their E averages drop to ~0.3-0.5
-    #     (insomnia and phase-shift respectively).
-    #   tau_T 48h → 24h kept from prior tuning — halves the relaxation
-    #     timescale so Set C recovers visibly within 14 days.
-    'mu_0':      -0.55,
+    # All values restored 2026-05-01 to the documented defaults from
+    # swat_entrainment_docs/README.md "At a glance". With the
+    # V_h-anabolic entrainment formula a healthy subject has
+    # E_dyn ≈ 0.85 (V_n=0.3) or ≈ 0.98 (V_n=0); mu = -0.5 + E ≥ +0.35
+    # comfortably above the bifurcation threshold. Set B's E ≈ 0.007
+    # and Set D's E = 0 (phase clamp) drive both into collapse.
+    'mu_0':      -0.5,
     'mu_E':       1.0,
     'eta':        0.5,
-    'tau_T':     24.0,
+    'tau_T':     48.0,
     'alpha_T':    0.3,
     'T_T':        0.0001,
+
+    # ── V_h-anabolic entrainment block (PR #11; documented in
+    # swat_entrainment_docs/) — V_h enters via the WIDTH of the
+    # entrainment amplitude bands, not as an additive offset to the
+    # backdrop. damp gives monotonic catabolic V_n response.
+    # phase clamp gives clinical pathology threshold at |V_c|=3h.
+    'lambda_amp_W': 5.0,    # V_h gain into A_W = lambda_amp_W * V_h
+    'lambda_amp_Z': 8.0,    # V_h gain into A_Z = lambda_amp_Z * V_h
+    'V_n_scale':    2.0,    # damp(V_n) = exp(-V_n / V_n_scale)
+    'V_c_max':      3.0,    # phase clamp threshold (hours)
 
     # ── 3-level ordinal sleep channel (Zt ∈ [0, 1] post-rescale) ──
     'delta_c':    0.25,    # c2 = c_tilde + delta_c = 0.417 + 0.25 = 0.667 (deep)

@@ -133,26 +133,43 @@ def _compute_E(trajectory, t_grid, params):
 
 
 def _compute_E_dynamics(trajectory, params):
-    """Dynamics-side E(t) — the one actually driving mu(E) inside the SDE.
+    """Dynamics-side E(t) — the V_h-anabolic formula actually driving
+    mu(E) inside the SDE.
 
-    Phase 3.6 (2026-05-01): redesigned as POLARITY alignment of W and Zt
-    with the EXTERNAL circadian C (matches `_dynamics.entrainment_quality`
-    and the inline E computations in `simulation.drift` / `drift_jax`):
+    Direct numpy port of `_dynamics.entrainment_quality` and
+    `simulation.entrainment_quality`. See
+    `swat_entrainment_docs/01_formula.md` for the full derivation.
 
-        E_W  = sigmoid(K_ALIGN · (2W  - 1) ·   C_external)
-        E_Zt = sigmoid(K_ALIGN · (2Zt - 1) · (-C_external))
-        E    = E_W · E_Zt
-
-    K_ALIGN = 16 (sharp polarity).
+        A_W   = lambda_amp_W · V_h
+        A_Z   = lambda_amp_Z · V_h
+        B_W   = V_n − a + alpha_T · T
+        B_Z   = -V_n + beta_Z · a
+        amp_W = sigma(B_W + A_W) − sigma(B_W − A_W)
+        amp_Z = sigma(B_Z + A_Z) − sigma(B_Z − A_Z)
+        damp  = exp(-V_n / V_n_scale)
+        phase = cos(π · min(|V_c|, V_c_max) / (2 · V_c_max))
+        E_dyn = damp · amp_W · amp_Z · phase
     """
-    del params
-    W  = trajectory[:, 0]
-    Zt = trajectory[:, 1]
-    C  = trajectory[:, 4]   # external circadian pacemaker (state 4)
-    K_ALIGN = 16.0
-    E_W  = 1.0 / (1.0 + np.exp(-K_ALIGN * (2.0 * W  - 1.0) *   C))
-    E_Zt = 1.0 / (1.0 + np.exp(-K_ALIGN * (2.0 * Zt - 1.0) * (-C)))
-    return E_W * E_Zt
+    a  = trajectory[:, 2]
+    T  = trajectory[:, 3]
+    Vh = trajectory[:, 5]
+    Vn = trajectory[:, 6]
+    p = params
+
+    A_W = p['lambda_amp_W'] * Vh
+    A_Z = p['lambda_amp_Z'] * Vh
+    B_W = Vn - a + p['alpha_T'] * T
+    B_Z = -Vn + p['beta_Z'] * a
+    sig = lambda x: 1.0 / (1.0 + np.exp(-x))
+    amp_W = sig(B_W + A_W) - sig(B_W - A_W)
+    amp_Z = sig(B_Z + A_Z) - sig(B_Z - A_Z)
+    damp  = np.exp(-Vn / p['V_n_scale'])
+
+    V_c_max = p['V_c_max']
+    V_c_eff = min(abs(p['V_c']), V_c_max)
+    phase = math.cos(math.pi * V_c_eff / (2.0 * V_c_max))
+
+    return damp * amp_W * amp_Z * phase
 
 
 def _safe_corr(x, y):
