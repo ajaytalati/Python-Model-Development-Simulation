@@ -400,9 +400,12 @@ def gen_sleep(trajectory, t_grid, params, aux, prior_channels, seed):
 
     c1 = p['c_tilde']
     c2 = c1 + p['delta_c']
+    # Sharpness ≈ A_SCALE=6 by default; recovers pre-rescale threshold
+    # separability in the [0, 1] Zt domain.
+    sharp = float(p.get('sleep_sharpness', 1.0))
 
-    s1 = _sigmoid(Zt - c1).astype(np.float64)   # P(sleep, any) = 1 - P(wake)
-    s2 = _sigmoid(Zt - c2).astype(np.float64)   # P(deep)
+    s1 = _sigmoid(sharp * (Zt - c1)).astype(np.float64)   # P(sleep, any) = 1 - P(wake)
+    s2 = _sigmoid(sharp * (Zt - c2)).astype(np.float64)   # P(deep)
 
     # Per-bin marginal probabilities: shape (T_len, 3) over (wake, light, deep).
     p_marg = np.stack([1.0 - s1, s1 - s2, s2], axis=1)
@@ -636,10 +639,18 @@ PARAM_SET_A = {
 
     # ── 3-level ordinal sleep channel (Zt ∈ [0, 1] post-rescale) ──
     'delta_c':    0.25,    # c2 = c_tilde + delta_c = 0.417 + 0.25 = 0.667 (deep)
+    # Sleep-sharpness multiplier — restores the original [0, A_SCALE=6] domain
+    # threshold sharpness after rescaling Zt to [0, 1]. Without this factor
+    # the sigmoid in the unit interval is too soft (delta_c=0.25 spans only
+    # ~6% of the 0-1 sigmoid's transition region), so even Set B (Zt mostly
+    # below c_tilde) would yield P_sleep ≈ 0.4 per bin. Setting sharpness
+    # equal to the legacy A_SCALE recovers the pre-rescale separability.
+    'sleep_sharpness': 10.0,
     # Sleep-stage persistence: P_stay = exp(-dt_h / tau_sleep_persist_h).
-    # At dt_h=5/60 and tau=0.5h, P_stay≈0.85 → mean run length ~7 bins
-    # (~35 min). Healthy sleep cycles last 30-90 min per stage.
-    'tau_sleep_persist_h': 0.5,
+    # At dt_h=5/60 and tau=1.0h, P_stay ≈ 0.92 → mean run length ~12 bins
+    # (~60 min). With sharp sigmoid above this gives clean wake/sleep blocks
+    # without over-persisting in Set B (insomnia, P_marg(sleep) ≈ 0.05).
+    'tau_sleep_persist_h': 1.0,
 
     # ── Steps log-Gaussian channel, wake-gated ───────────────────
     # log(steps + 1) ~ N(mu_step0 + beta_W_steps * W, sigma_step^2),
@@ -663,7 +674,9 @@ INIT_STATE_A = {
     'a_0':    0.5,
     'T_0':    0.5,      # start near healthy equilibrium T* ~ 0.5 (physically plausible)
     'Vh':     1.0,      # healthy basin
-    'Vn':     0.3,
+    'Vn':     0.0,      # 2026-05-01: was 0.3; per user, V_n=0 in A/C/D gives a
+                         # clean baseline diagnostic (no chronic load). Set B
+                         # explicitly overrides Vn=3.5 below.
 }
 
 # Time-grid controls

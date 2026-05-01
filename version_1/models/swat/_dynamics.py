@@ -347,13 +347,14 @@ def hr_mean(y: Array, params: Array, pi: Dict[str, int]) -> Array:
 
 
 def sleep_prob(y: Array, params: Array, pi: Dict[str, int]) -> Array:
-    """Prob(sleep ≥ 1 | y) = sigmoid(Zt - c_tilde).
+    """Prob(sleep ≥ 1 | y) = sigmoid(sleep_sharpness * (Zt - c_tilde)).
 
     Backward-compatible binary helper retained for callers that only
     need the wake-vs-sleep cut. For 3-level inference, use
     ``sleep_level_log_probs``.
     """
-    return jax.nn.sigmoid(y[1] - params[pi['c_tilde']])
+    sharp = params[pi['sleep_sharpness']] if 'sleep_sharpness' in pi else 1.0
+    return jax.nn.sigmoid(sharp * (y[1] - params[pi['c_tilde']]))
 
 
 def sleep_level_log_probs(y: Array, params: Array,
@@ -361,9 +362,9 @@ def sleep_level_log_probs(y: Array, params: Array,
     """Log-probabilities of the 3-level ordinal sleep stages.
 
     Mirrors ``simulation.py:gen_sleep`` exactly:
-        c1 = c_tilde,  c2 = c_tilde + delta_c
-        s1 = sigmoid(Zt - c1)         # P(sleep, any)
-        s2 = sigmoid(Zt - c2)         # P(deep)
+        c1 = c_tilde,  c2 = c_tilde + delta_c,  k = sleep_sharpness
+        s1 = sigmoid(k * (Zt - c1))         # P(sleep, any)
+        s2 = sigmoid(k * (Zt - c2))         # P(deep)
         P(level=0 = wake)      = 1 - s1
         P(level=1 = light+REM) = s1 - s2
         P(level=2 = deep)      = s2
@@ -373,8 +374,9 @@ def sleep_level_log_probs(y: Array, params: Array,
     Zt = y[1]
     c1 = params[pi['c_tilde']]
     c2 = c1 + params[pi['delta_c']]
-    s1 = jax.nn.sigmoid(Zt - c1)
-    s2 = jax.nn.sigmoid(Zt - c2)
+    sharp = params[pi['sleep_sharpness']] if 'sleep_sharpness' in pi else 1.0
+    s1 = jax.nn.sigmoid(sharp * (Zt - c1))
+    s2 = jax.nn.sigmoid(sharp * (Zt - c2))
 
     p0 = 1.0 - s1
     p1 = s1 - s2
