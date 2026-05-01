@@ -114,25 +114,39 @@ def circadian_jax(t, params):
     return jnp.sin(2.0 * jnp.pi * t / 24.0 + PHI_MORNING_TYPE)
 
 
-def entrainment_quality(W, Zt, a, T, Vh, Vn, params):
-    """Amplitude × phase entrainment quality E in [0, 1] — V_c-aware.
+def entrainment_quality(W, Zt, a, T, Vh, Vn, params, C=None):
+    """Alignment-based entrainment quality E in [0, 1].
 
-    Phase quality is a function of V_c ONLY (no daily ripple).  W, Zt
-    retained for API compatibility but unused here.
+    Redesigned 2026-05-01 (Phase 3.6) per user feedback that the
+    previous flip-flop-engagement formula was structurally backwards:
+    a subject who is awake during the day and deep asleep at night
+    IS perfectly entrained — E should be ~1 sustained, not flip-
+    flopping at the wake↔sleep transitions.
+
+    The new formula measures alignment of W and Zt with their
+    EXTERNAL circadian targets:
+        target_W(t)  = (1 + C(t)) / 2   — high during day
+        target_Zt(t) = (1 - C(t)) / 2   — high during night
+        E = max(0, 1 - 4·(W - target_W)²) · max(0, 1 - 4·(Zt - target_Zt)²)
+
+    V_c degrades alignment automatically because the subject's W
+    follows the V_c-shifted internal drive C_eff, but the target
+    uses the EXTERNAL pacemaker C — no separate phase_quality
+    factor needed.
+
+    a, T, Vh, Vn retained for backwards-compatible signature but
+    no longer used. Callers that pass C explicitly get the proper
+    alignment; callers that pass C=None default to C=0 (a coarse
+    fallback for callers that don't carry the pacemaker state, e.g.
+    cycle-averaged identifiability scripts).
     """
-    del W, Zt
-    p = params
-
-    mu_W_slow = Vh + Vn - a + p['alpha_T'] * T
-    mu_Z_slow = -Vn + p['beta_Z'] * a
-    sW = float(_sigmoid(mu_W_slow))
-    sZ = float(_sigmoid(mu_Z_slow))
-    amp_quality = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
-
-    V_c_rad = 2.0 * math.pi * p['V_c'] / 24.0
-    phase_quality = max(math.cos(V_c_rad), 0.0)
-
-    return amp_quality * phase_quality
+    del a, T, Vh, Vn, params
+    if C is None:
+        C = 0.0
+    K_ALIGN = 16.0
+    E_W  = float(_sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C))
+    E_Zt = float(_sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C)))
+    return E_W * E_Zt
 
 
 # =========================================================================
@@ -166,15 +180,13 @@ def drift(t, y, params, aux):
     u_W = -kappa * Zt + lam * C_eff + Vh + Vn - a + alpha_T * T
     u_Z = -gamma_3 * W - Vn + beta_Z * a
 
-    # Entrainment quality: amplitude × phase (V_c-aware).
-    mu_W_slow = Vh + Vn - a + alpha_T * T
-    mu_Z_slow = -Vn + beta_Z * a
-    sW = float(_sigmoid(mu_W_slow))
-    sZ = float(_sigmoid(mu_Z_slow))
-    amp_quality = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
-    V_c_rad = 2.0 * math.pi * V_c / 24.0
-    phase_quality = max(math.cos(V_c_rad), 0.0)
-    E = amp_quality * phase_quality
+    # Entrainment quality: POLARITY alignment of W and Zt with the
+    # EXTERNAL circadian C. See _dynamics.entrainment_quality() docstring
+    # for full rationale.
+    K_ALIGN = 16.0
+    E_W  = float(_sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C_exact))
+    E_Zt = float(_sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C_exact)))
+    E = E_W * E_Zt
 
     mu_bifurc = mu_0 + mu_E * E  # Stuart-Landau bifurcation parameter
 
@@ -210,15 +222,11 @@ def drift_jax(t, y, args):
     u_W = -p['kappa'] * Zt + p['lmbda'] * C_eff + Vh + Vn - a + p['alpha_T'] * T
     u_Z = -p['gamma_3'] * W - Vn + p['beta_Z'] * a
 
-    # Entrainment quality: amplitude × phase (V_c-aware).
-    mu_W_slow = Vh + Vn - a + p['alpha_T'] * T
-    mu_Z_slow = -Vn + p['beta_Z'] * a
-    sW = jax.nn.sigmoid(mu_W_slow)
-    sZ = jax.nn.sigmoid(mu_Z_slow)
-    amp_quality = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
-    V_c_rad = 2.0 * jnp.pi * V_c / 24.0
-    phase_quality = jnp.maximum(jnp.cos(V_c_rad), 0.0)
-    E = amp_quality * phase_quality
+    # POLARITY alignment of W, Zt with EXTERNAL C (see _dynamics docstring).
+    K_ALIGN = 16.0
+    E_W  = jax.nn.sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C_ex)
+    E_Zt = jax.nn.sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C_ex))
+    E = E_W * E_Zt
 
     mu_bifurc = p['mu_0'] + p['mu_E'] * E
 
@@ -616,10 +624,18 @@ PARAM_SET_A = {
     #   c_tilde  (wake → light): 2.5 / 6 ≈ 0.417
     #   delta_c  (light → deep): 1.5 / 6 = 0.25  → c2 = 0.667
     'c_tilde':    0.417,
-    'tau_a':      3.0,
-    # beta_Z 4.0 unchanged; the relative coupling strength (a → u_Z → sigma)
-    # is identical post-rescale because a is also in [0, 1].
-    'beta_Z':     4.0,
+    # tau_a 3h → 5h (2026-05-01) — slower adenosine drain keeps the
+    # (a → u_Z → Zt) coupling pumping Zt up through the full overnight
+    # period, increasing sleep depth as requested. With tau_a=3h and
+    # 8h of sleep, a drains by exp(-8/3) ≈ 7%, dropping Zt steeply
+    # toward the end of the night; tau_a=5h gives ~20% retained drive
+    # at end-of-night.
+    'tau_a':      5.0,
+    # beta_Z 4 → 6 (2026-05-01) — stronger (a → Zt) coupling so the
+    # nighttime Zt saturates higher. With a≈0.5 in mid-night and
+    # beta_Z=6, sigmoid(3.0) ≈ 0.95 vs old beta_Z=4 → sigmoid(2.0)
+    # ≈ 0.88 — Zt now sits closer to the [0, 1] ceiling for longer.
+    'beta_Z':     6.0,
     'T_W':        0.01,
     # T_Z 0.05 unchanged in raw value — the rescale of Zt to [0, 1] makes
     # the per-bin Jacobi-noise step smaller automatically (sqrt(Z*(1-Z))
@@ -630,17 +646,15 @@ PARAM_SET_A = {
     'T_a':        0.01,
 
     # ── Stuart-Landau testosterone block ───────────
-    # Tuning 2026-05-01 to make Set C visibly recover within the 14-day
-    # horizon and Set A robustly sit in the healthy basin:
-    #   mu_0 -0.5 → -0.3 — the structural tradeoff between mu_W_slow≈0
-    #     (which wants a≈1) and mu_Z_slow≈0 (which wants a≈0) caps the
-    #     time-averaged E_dyn at ~0.4 with V_h=1, V_n=0. With the old
-    #     mu_0=-0.5 (E_crit=0.5), avg mu was negative → T decayed.
-    #     With mu_0=-0.3 (E_crit=0.3), avg mu is positive → T grows.
-    #   tau_T 48h → 24h — halves the relaxation timescale so Set C
-    #     reaches the new healthy equilibrium T* = sqrt((mu_0+E_avg)/eta)
-    #     within the 14-day horizon instead of needing 30+ days.
-    'mu_0':      -0.3,
+    # Tuning 2026-05-01 (Phase 3.6 — alignment-based entrainment):
+    #   mu_0 -0.3 → -0.85 — with the new alignment formula a healthy
+    #     subject has E ≈ 1 sustained, so mu = mu_0 + mu_E·E ≈ +0.15
+    #     gives T* = sqrt(0.15/0.5) ≈ 0.55 (the spec target). Set B
+    #     and D collapse because their E averages drop to ~0.3-0.5
+    #     (insomnia and phase-shift respectively).
+    #   tau_T 48h → 24h kept from prior tuning — halves the relaxation
+    #     timescale so Set C recovers visibly within 14 days.
+    'mu_0':      -0.55,
     'mu_E':       1.0,
     'eta':        0.5,
     'tau_T':     24.0,

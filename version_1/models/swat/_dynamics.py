@@ -70,38 +70,43 @@ _STATE_NAMES = ('W', 'Zt', 'a', 'T', 'C', 'Vh', 'Vn')
 
 def entrainment_quality(y: Array, params: Array,
                         pi: Dict[str, int]) -> Array:
-    """Entrainment quality E(t) in [0, 1] — V_c-aware.
+    """Entrainment quality E(t) in [0, 1] — POLARITY alignment of W
+    and Zt with the EXTERNAL circadian cycle.
 
-    Combines amplitude quality (slow-backdrop balance) with phase
-    alignment (subject's V_c shift vs external light cycle).  Phase
-    quality depends on V_c ONLY, not on t — no daily ripple.
+    Redesigned 2026-05-01 (Phase 3.6): the previous "amp_quality"
+    formula 4σ(1-σ) measured TRANSITION ACTIVITY (peaked at the
+    sleep-wake threshold), which is BACKWARDS from the physiological
+    notion of entrainment. A subject who is wake during the day and
+    deeply asleep at night IS perfectly entrained — E should be ~1
+    sustained, not flip-flopping with daily transitions.
+
+    Formulation:
+        E_W  = sigmoid(K_align · (2W  - 1) ·   C_ext )
+        E_Zt = sigmoid(K_align · (2Zt - 1) · (-C_ext))
+        E    = E_W · E_Zt
+
+    Each factor is high when the state is on the SAME side of its
+    midpoint (0.5) as C is of 0. Polarity-based, not shape-based:
+    a subject whose W jumps sharply between 0 and 1 in sync with
+    C's sign gets E ≈ 1 sustained, even though shape-alignment
+    `1 - 4·(W - (1+C)/2)²` would penalise the sharpness.
+
+    V_c phase-shift naturally degrades alignment because subject's W
+    follows C_eff (V_c-shifted internal drive) but the polarity
+    check uses EXTERNAL C — no separate phase_quality factor needed.
+
+    K_align = 8 by default — sharp enough to give E ≈ 1 at clear
+    polarity, smoothly fading to 0 as C crosses zero (twilight).
     """
-    a, T = y[2], y[3]
-    Vh, Vn = y[5], y[6]
-
-    beta_Z  = params[pi['beta_Z']]
-    alpha_T = params[pi['alpha_T']]
-    V_c     = params[pi['V_c']]
-
-    # --- amplitude quality: can the flip-flop engage at all? ---
-    mu_W_slow = Vh + Vn - a + alpha_T * T
-    mu_Z_slow = -Vn + beta_Z * a
-    sW = jax.nn.sigmoid(mu_W_slow)
-    sZ = jax.nn.sigmoid(mu_Z_slow)
-    E_W = 4.0 * sW * (1.0 - sW)
-    E_Z = 4.0 * sZ * (1.0 - sZ)
-    amp_quality = E_W * E_Z
-
-    # --- phase alignment: is subject's rhythm in sync with external light? ---
-    # Function of V_c ONLY (no daily ripple).  max(cos(2π V_c/24), 0):
-    #   V_c = 0h  -> 1.0 (aligned)
-    #   V_c = ±3h -> 0.707
-    #   V_c = ±6h -> 0.0  (shift worker)
-    #   V_c = ±12h -> 0.0 (full inversion; clipped by max)
-    V_c_rad = 2.0 * jnp.pi * V_c / 24.0
-    phase_quality = jnp.maximum(jnp.cos(V_c_rad), 0.0)
-
-    return amp_quality * phase_quality
+    del pi
+    del params
+    W, Zt, C = y[0], y[1], y[4]
+    K_ALIGN = 16.0   # sharper polarity check → E ≈ 1 outside the brief
+                      # twilight C-crossings; raised from 8 so healthy E_avg
+                      # sits ~0.85 instead of ~0.7.
+    E_W  = jax.nn.sigmoid(K_ALIGN * (2.0 * W  - 1.0) *   C)
+    E_Zt = jax.nn.sigmoid(K_ALIGN * (2.0 * Zt - 1.0) * (-C))
+    return E_W * E_Zt
 
 
 # =========================================================================

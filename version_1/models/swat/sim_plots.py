@@ -135,31 +135,24 @@ def _compute_E(trajectory, t_grid, params):
 def _compute_E_dynamics(trajectory, params):
     """Dynamics-side E(t) — the one actually driving mu(E) inside the SDE.
 
-    Matches _dynamics.entrainment_quality and the inline computation in
-    simulation.drift / drift_jax:
-        amp_quality  = 4*sigma(mu_W_slow)*(1-sigma) * 4*sigma(mu_Z_slow)*(1-sigma)
-        phase_quality = max(cos(2*pi*V_c/24), 0)
-        E = amp_quality * phase_quality
+    Phase 3.6 (2026-05-01): redesigned as POLARITY alignment of W and Zt
+    with the EXTERNAL circadian C (matches `_dynamics.entrainment_quality`
+    and the inline E computations in `simulation.drift` / `drift_jax`):
 
-    This is what appears in the bifurcation parameter mu(E) = mu_0 + mu_E * E.
-    It differs from _compute_E (windowed amplitude x phase-correlation from
-    the plot) because the dynamics needs something instantaneous and cheap.
+        E_W  = sigmoid(K_ALIGN · (2W  - 1) ·   C_external)
+        E_Zt = sigmoid(K_ALIGN · (2Zt - 1) · (-C_external))
+        E    = E_W · E_Zt
+
+    K_ALIGN = 16 (sharp polarity).
     """
-    a  = trajectory[:, 2]
-    T  = trajectory[:, 3]
-    Vh = trajectory[:, 5]
-    Vn = trajectory[:, 6]
-    p = params
-
-    mu_W_slow = Vh + Vn - a + p['alpha_T'] * T
-    mu_Z_slow = -Vn + p['beta_Z'] * a
-    sW = 1.0 / (1.0 + np.exp(-mu_W_slow))
-    sZ = 1.0 / (1.0 + np.exp(-mu_Z_slow))
-    amp = (4.0 * sW * (1.0 - sW)) * (4.0 * sZ * (1.0 - sZ))
-
-    V_c_rad = 2.0 * np.pi * p['V_c'] / 24.0
-    phase = max(np.cos(V_c_rad), 0.0)
-    return amp * phase
+    del params
+    W  = trajectory[:, 0]
+    Zt = trajectory[:, 1]
+    C  = trajectory[:, 4]   # external circadian pacemaker (state 4)
+    K_ALIGN = 16.0
+    E_W  = 1.0 / (1.0 + np.exp(-K_ALIGN * (2.0 * W  - 1.0) *   C))
+    E_Zt = 1.0 / (1.0 + np.exp(-K_ALIGN * (2.0 * Zt - 1.0) * (-C)))
+    return E_W * E_Zt
 
 
 def _safe_corr(x, y):
