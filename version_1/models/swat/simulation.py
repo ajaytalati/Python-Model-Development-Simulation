@@ -65,7 +65,8 @@ import math
 import numpy as np
 
 from simulator.sde_model import (
-    SDEModel, StateSpec, ChannelSpec, DIFFUSION_DIAGONAL_CONSTANT)
+    SDEModel, StateSpec, ChannelSpec,
+    DIFFUSION_DIAGONAL_CONSTANT, DIFFUSION_DIAGONAL_STATE)
 from models.swat.sim_plots import plot_swat
 
 
@@ -178,7 +179,7 @@ def drift(t, y, params, aux):
     mu_bifurc = mu_0 + mu_E * E  # Stuart-Landau bifurcation parameter
 
     dW  = (float(_sigmoid(u_W)) - W) / tau_W
-    dZt = (A_SCALE * float(_sigmoid(u_Z)) - Zt) / tau_Z
+    dZt = (float(_sigmoid(u_Z)) - Zt) / tau_Z   # Zt ∈ [0, 1]: saturates at 1
     da  = (W - a) / tau_a
     dT  = (mu_bifurc * T - eta * T ** 3) / tau_T
 
@@ -222,7 +223,7 @@ def drift_jax(t, y, args):
     mu_bifurc = p['mu_0'] + p['mu_E'] * E
 
     dW  = (jax.nn.sigmoid(u_W) - W) / p['tau_W']
-    dZt = (A_SCALE * jax.nn.sigmoid(u_Z) - Zt) / p['tau_Z']
+    dZt = (jax.nn.sigmoid(u_Z) - Zt) / p['tau_Z']    # Zt ∈ [0, 1]
     da  = (W - a) / p['tau_a']
     dT  = (mu_bifurc * T - p['eta'] * T ** 3) / p['tau_T']
     # C state tracks the external light cycle
@@ -237,19 +238,69 @@ def drift_jax(t, y, args):
 # =========================================================================
 
 def diffusion_diagonal(params):
-    """Diagonal SDE coefficients.
+    """Constant diffusion magnitudes sigma_i = sqrt(2 * T_i).
 
-    States 4 (C), 5 (Vh), 6 (Vn) are deterministic in Phase 1 -> zero.
+    The full per-step increment is sigma_i * g_i(y) * sqrt(dt) * xi_i,
+    where g_i comes from ``noise_scale_fn`` (Jacobi for the [0, 1]
+    states W, Zt, a; identity for T; arbitrary for the deterministic
+    states C, Vh, Vn since their sigma_i is 0 anyway).
+
+    States 4 (C), 5 (Vh), 6 (Vn) are deterministic -> sigma = 0.
     """
     p = params
     return np.array([
         math.sqrt(2.0 * p['T_W']),
         math.sqrt(2.0 * p['T_Z']),
         math.sqrt(2.0 * p['T_a']),
-        math.sqrt(2.0 * p['T_T']),   # testosterone noise
+        math.sqrt(2.0 * p['T_T']),   # state-INDEPENDENT for T (Stuart-Landau
+                                     # absorbing-boundary fix; see noise_scale_fn)
         0.0,   # C (deterministic)
         0.0,   # Vh (constant)
         0.0,   # Vn (constant)
+    ])
+
+
+def noise_scale_fn(y, params):
+    """State-dependent diagonal noise multipliers (numpy).
+
+    For W, Zt, a (all in [0, 1]) use Jacobi: g(x) = sqrt(x*(1-x)) so
+    the SDE stays in [0, 1] intrinsically (diffusion vanishes at
+    boundaries). For T use g = 1 (additive noise) — the Stuart-Landau
+    drift (mu T - eta T^3) vanishes at T=0, so a state-dependent
+    multiplier sqrt(T) would make T=0 absorbing. The deterministic
+    states (C, Vh, Vn) have sigma=0 in diffusion_diagonal so their
+    multiplier doesn't matter; we set 1.0 for symmetry.
+    """
+    del params
+    W = max(0.0, min(1.0, float(y[0])))
+    Zt = max(0.0, min(1.0, float(y[1])))
+    a = max(0.0, min(1.0, float(y[2])))
+    return np.array([
+        math.sqrt(W * (1.0 - W)),
+        math.sqrt(Zt * (1.0 - Zt)),
+        math.sqrt(a * (1.0 - a)),
+        1.0,   # T (state-INDEP; preserves additive Gaussian kicks at T=0)
+        1.0,
+        1.0,
+        1.0,
+    ])
+
+
+def noise_scale_fn_jax(y, params):
+    """JAX state-dependent noise multipliers — matches noise_scale_fn."""
+    import jax.numpy as jnp
+    del params
+    W = jnp.clip(y[0], 0.0, 1.0)
+    Zt = jnp.clip(y[1], 0.0, 1.0)
+    a = jnp.clip(y[2], 0.0, 1.0)
+    return jnp.array([
+        jnp.sqrt(W * (1.0 - W)),
+        jnp.sqrt(Zt * (1.0 - Zt)),
+        jnp.sqrt(a * (1.0 - a)),
+        1.0,   # T
+        1.0,
+        1.0,
+        1.0,
     ])
 
 
@@ -386,41 +437,49 @@ def gen_sleep(trajectory, t_grid, params, aux, prior_channels, seed):
 
 
 def gen_steps(trajectory, t_grid, params, aux, prior_channels, seed):
-    """Poisson step-count channel on 15-minute bins.
+    """Steps channel — log-Gaussian, WAKE-GATED.
 
-    Rate:
-        r(W) = lambda_base + lambda_step * sigma(10 * (W - W_thresh))
-    Bin count:
-        k_bin ~ Poisson(r(W_bin) * bin_hours)
+    Replaces the older Poisson channel as of 2026-05-01 to match
+    FSA-v2's pattern (ports cleanly into the bench's SMC²-MPC obs
+    likelihood).
 
-    where W_bin is the mean wakefulness over the 15-min bin.
+    For each per-step bin (t_grid resolution, e.g. 5 min):
+      log_value = log(steps + 1) ~ N(mu_step0 + beta_W_steps * W,
+                                      sigma_step^2)
+    Only "observed" when sleep_label == 0 (wake) — the sticky-HMM
+    sleep generator's `sleep_level` channel runs first (see
+    SWAT_MODEL ChannelSpec ordering), and gen_steps reads it from
+    prior_channels.
+
+    Returns a per-bin array of log_value plus a present_mask flag
+    (1.0 in wake bins, 0.0 elsewhere). Downstream consumers (psim's
+    plot, the bench's `align_obs_fn`) decide how to surface the
+    masked bins (typically scatter only the present ones).
     """
-    del aux, prior_channels
+    del aux
     rng = np.random.default_rng(seed)
     W = trajectory[:, 0]
     p = params
-    dt_h = float(t_grid[1] - t_grid[0])
+    T_len = len(t_grid)
 
-    # 15-min bin size (in sample count)
-    bin_hours = 0.25
-    bin_size = max(int(round(bin_hours / dt_h)), 1)
-    n_bins = len(t_grid) // bin_size
+    # Wake gate: read sleep_level from the upstream channel. Default to
+    # all-wake if absent (e.g. when steps is run without sleep — keeps
+    # the channel useful for diagnostic / unit-test purposes).
+    sleep_chan = prior_channels.get('sleep') if prior_channels else None
+    if sleep_chan is not None and 'sleep_level' in sleep_chan:
+        sleep_level = np.asarray(sleep_chan['sleep_level'])
+        present_mask = (sleep_level == 0).astype(np.float64)
+    else:
+        present_mask = np.ones(T_len, dtype=np.float64)
 
-    # Mean W per bin
-    W_trunc = W[: n_bins * bin_size].reshape(n_bins, bin_size).mean(axis=1)
-
-    rate = p['lambda_base'] + p['lambda_step'] * _sigmoid(
-        10.0 * (W_trunc - p['W_thresh']))
-    expected = rate * bin_hours
-    k = rng.poisson(expected).astype(np.int32)
-
-    # Timestamp for each bin = bin start
-    bin_t_idx = (np.arange(n_bins) * bin_size).astype(np.int32)
+    log_mean = p['mu_step0'] + p['beta_W_steps'] * W
+    log_value = log_mean + rng.normal(0.0, p['sigma_step'], size=T_len)
+    log_value = log_value.astype(np.float32)
 
     return {
-        't_idx':      bin_t_idx,
-        'steps':      k,
-        'bin_hours':  np.float32(bin_hours),
+        't_idx':        np.arange(T_len, dtype=np.int32),
+        'log_value':    log_value,        # log(steps + 1)
+        'present_mask': present_mask.astype(np.float32),
     }
 
 
@@ -504,9 +563,10 @@ def verify_physics(trajectory, t_grid, params):
 
     return {
         # ── Gating booleans (range + finiteness) ──────────────────────
+        # Zt and a are now in [0, 1] (Phase 3.6 rescale + Jacobi diffusion).
         'W_in_0_1':       bool((W.min() > -0.05) and (W.max() < 1.05)),
-        'Zt_in_0_A':      bool((Zt.min() > -0.5) and (Zt.max() < A_SCALE + 0.5)),
-        'a_nonneg':       bool(a.min() > -0.5),
+        'Zt_in_0_1':      bool((Zt.min() > -0.05) and (Zt.max() < 1.05)),
+        'a_in_0_1':       bool((a.min() > -0.05) and (a.max() < 1.05)),
         'T_nonneg':       bool(T.min() > -0.1),
         'T_bounded':      bool(T.max() < 4.0 * max(T_max_expected, 1.0) + 1.0),
         'all_finite':     bool(np.all(np.isfinite(trajectory))),
@@ -548,31 +608,21 @@ PARAM_SET_A = {
     'HR_base':   50.0,
     'alpha_HR':  25.0,
     'sigma_HR':   8.0,
-    # Re-tuned 2026-04-26 (was 3.0): lower sleep threshold so total
-    # sleep fraction reaches healthy ~33%/day. Closes
-    # https://github.com/ajaytalati/Python-Model-Development-Simulation/issues/8
-    # Without this change, sleep_fraction was ~19% with the new
-    # beta_Z=4.0 (#5/#7); the (a→Zt) coupling pushes Zt high enough
-    # for the first ~7-8h of sleep but not for the full overnight
-    # period because a drains with tau_a=3h.
-    'c_tilde':    2.5,
+    # Sleep-stage thresholds rescaled 2026-05-01 from the old [0, A_SCALE=6]
+    # domain to the new [0, 1] domain (drift no longer multiplies by A_SCALE):
+    #   c_tilde  (wake → light): 2.5 / 6 ≈ 0.417
+    #   delta_c  (light → deep): 1.5 / 6 = 0.25  → c2 = 0.667
+    'c_tilde':    0.417,
     'tau_a':      3.0,
-    # Re-tuned 2026-04-26 (was 2.5): boost adenosine→Zt coupling so
-    # overnight Zt amplitude reaches the deep-sleep threshold
-    # c2 = c_tilde + delta_c = 4.5 deterministically. Closes
-    # https://github.com/ajaytalati/Python-Model-Development-Simulation/issues/5
-    # (Zt was peaking at ~4.3 with beta_Z=2.5; deep-sleep happened only
-    # via the stochastic noise floor, impairing identifiability of
-    # (delta_c, beta_Z, tau_a) joint in downstream SMC² inference).
+    # beta_Z 4.0 unchanged; the relative coupling strength (a → u_Z → sigma)
+    # is identical post-rescale because a is also in [0, 1].
     'beta_Z':     4.0,
     'T_W':        0.01,
-    # T_Z left at 0.05 — the sticky-sleep transition kernel (added
-    # 2026-05-01, see `tau_sleep_persist_h` below + gen_sleep) is
-    # what actually fixes the per-bin label flicker. Lowering T_Z
-    # additionally was tried and had the side effect of damping Zt's
-    # amplitude (peak 5.5 → 4.5), starving the deep-sleep threshold
-    # c2 = c_tilde + delta_c = 4.0 of crossings. Keep T_Z at 0.05
-    # so deep_sleep_fraction stays near the realistic ~15% target.
+    # T_Z 0.05 unchanged in raw value — the rescale of Zt to [0, 1] makes
+    # the per-bin Jacobi-noise step smaller automatically (sqrt(Z*(1-Z))
+    # peaks at 0.5 vs the old constant 1.0, so the effective step is now
+    # ~0.5x smaller for the same T_Z). Sleep blocks rely on the sticky-
+    # HMM kernel in gen_sleep (see `tau_sleep_persist_h`).
     'T_Z':        0.05,
     'T_a':        0.01,
 
@@ -584,17 +634,21 @@ PARAM_SET_A = {
     'alpha_T':    0.3,
     'T_T':        0.0001,
 
-    # ── New 3-level ordinal sleep channel ────────────────────
-    'delta_c':    1.5,    # c2 = c_tilde + delta_c; c1=2.5 -> c2=4.0 (deep threshold)
+    # ── 3-level ordinal sleep channel (Zt ∈ [0, 1] post-rescale) ──
+    'delta_c':    0.25,    # c2 = c_tilde + delta_c = 0.417 + 0.25 = 0.667 (deep)
     # Sleep-stage persistence: P_stay = exp(-dt_h / tau_sleep_persist_h).
     # At dt_h=5/60 and tau=0.5h, P_stay≈0.85 → mean run length ~7 bins
     # (~35 min). Healthy sleep cycles last 30-90 min per stage.
     'tau_sleep_persist_h': 0.5,
 
-    # ── New steps Poisson channel ────────────────────────────
-    'lambda_base': 0.5,    # rare steps during sleep (~0.5 steps/h)
-    'lambda_step': 200.0,  # peak rate during wake (~50 steps/15min bin)
-    'W_thresh':    0.6,    # threshold above which step rate activates
+    # ── Steps log-Gaussian channel, wake-gated ───────────────────
+    # log(steps + 1) ~ N(mu_step0 + beta_W_steps * W, sigma_step^2),
+    # observed only when sleep_label == 0 (wake). Per 15-min wake bin:
+    # at W=0.5, log_mean = 4.4 → ~80 steps/bin ≈ 320 steps/h (typical
+    # light-activity wake bin). Replaces the older Poisson channel.
+    'mu_step0':       4.0,
+    'beta_W_steps':   0.8,
+    'sigma_step':     0.5,
 
     # ── New Garmin stress channel ────────────────────────────
     's_base':     30.0,    # baseline stress score
@@ -605,7 +659,7 @@ PARAM_SET_A = {
 
 INIT_STATE_A = {
     'W_0':    0.5,
-    'Zt_0':   3.5,
+    'Zt_0':   0.583,    # rescaled from 3.5 / A_SCALE=6 = 0.583 (Zt now ∈ [0, 1])
     'a_0':    0.5,
     'T_0':    0.5,      # start near healthy equilibrium T* ~ 0.5 (physically plausible)
     'Vh':     1.0,      # healthy basin
@@ -656,13 +710,15 @@ INIT_STATE_D = dict(INIT_STATE_A)
 
 SWAT_MODEL = SDEModel(
     name="swat",
-    version="1.0",
+    version="1.1",        # Phase 3.6: Jacobi diffusion + Zt, a ∈ [0, 1] +
+                          # log-Gaussian wake-gated steps + sticky sleep.
 
     states=(
         StateSpec("W",  0.0, 1.0),
-        StateSpec("Zt", 0.0, A_SCALE),
-        StateSpec("a",  0.0, 5.0),
-        StateSpec("T",  0.0, 5.0),   # testosterone pulsatility amplitude
+        StateSpec("Zt", 0.0, 1.0),    # rescaled from [0, A_SCALE=6]
+        StateSpec("a",  0.0, 1.0),    # rescaled from [0, 5] (a is a low-pass
+                                       # of W ∈ [0,1], naturally in [0, 1])
+        StateSpec("T",  0.0, 5.0),    # testosterone pulsatility amplitude
         StateSpec("C", -1.0, 1.0, is_deterministic=True,
                   analytical_fn=circadian, analytical_fn_jax=circadian_jax),
         StateSpec("Vh", -5.0, 5.0, is_deterministic=True),
@@ -671,16 +727,20 @@ SWAT_MODEL = SDEModel(
 
     drift_fn=drift,
     drift_fn_jax=drift_jax,
-    diffusion_type=DIFFUSION_DIAGONAL_CONSTANT,
+    diffusion_type=DIFFUSION_DIAGONAL_STATE,    # Jacobi for W/Zt/a, identity for T
     diffusion_fn=diffusion_diagonal,
+    noise_scale_fn=noise_scale_fn,
+    noise_scale_fn_jax=noise_scale_fn_jax,
     make_aux_fn=make_aux,
     make_aux_fn_jax=make_aux_jax,
     make_y0_fn=make_y0,
 
     channels=(
+        # gen_sleep MUST run before gen_steps so that gen_steps can read the
+        # wake-gate (sleep_label==0) for its log-Gaussian wake-gated channel.
         ChannelSpec("hr",     depends_on=(), generate_fn=gen_hr),
         ChannelSpec("sleep",  depends_on=(), generate_fn=gen_sleep),
-        ChannelSpec("steps",  depends_on=(), generate_fn=gen_steps),
+        ChannelSpec("steps",  depends_on=("sleep",), generate_fn=gen_steps),
         ChannelSpec("stress", depends_on=(), generate_fn=gen_stress),
     ),
 

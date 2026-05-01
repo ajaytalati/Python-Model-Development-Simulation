@@ -278,24 +278,29 @@ def _plot_observations(trajectory, t_grid, channel_outputs, params, save_path):
     axes[1].legend(loc='upper right', fontsize=8)
     axes[1].grid(True, alpha=0.3)
 
-    # ── Panel 3: steps (Poisson, 15-min bins) ──
+    # ── Panel 3: steps (log-Gaussian, wake-gated, per-bin) ──
     st_chan = channel_outputs.get('steps', {})
-    if 'steps' in st_chan:
+    if 'log_value' in st_chan:
         st_t_idx = st_chan['t_idx']
-        st_counts = st_chan['steps']
+        st_log = np.asarray(st_chan['log_value'])
+        st_present = np.asarray(st_chan['present_mask'])
+        # Recover step count from log(steps + 1).
+        st_counts = np.expm1(st_log)
         st_days = t_grid[st_t_idx] / 24.0
-        # Bar width = 15 min in units of days
-        bar_w = 0.25 / 24.0 * 0.9
-        axes[2].bar(st_days, st_counts, width=bar_w, color='seagreen',
-                    alpha=0.7, edgecolor='none',
-                    label=f'steps/15min (Poisson)')
-        # Overlay the deterministic rate curve for reference
+        # Scatter only the wake-gated (present) observations.
+        wake = st_present > 0.5
+        axes[2].scatter(st_days[wake], st_counts[wake], s=2.5, alpha=0.5,
+                        color='seagreen',
+                        label='steps obs (wake bins, log-Gaussian)')
+        # Overlay the deterministic mean E[steps | W] = exp(μ + σ²/2) − 1
         W = trajectory[:, 0]
-        rate = (params['lambda_base'] + params['lambda_step'] *
-                _sigmoid(10.0 * (W - params['W_thresh']))) * 0.25
-        axes[2].plot(t_days, rate, lw=0.6, color='darkgreen', alpha=0.6,
-                     label='expected count (rate × bin)')
-    axes[2].set_ylabel('Steps per 15 min')
+        log_mean = (params['mu_step0']
+                    + params['beta_W_steps'] * W)
+        sigma = params['sigma_step']
+        mean_count = np.exp(log_mean + 0.5 * sigma ** 2) - 1.0
+        axes[2].plot(t_days, mean_count, lw=0.6, color='darkgreen', alpha=0.6,
+                     label='E[steps | W]')
+    axes[2].set_ylabel('Steps per bin (wake-gated)')
     axes[2].legend(loc='upper right', fontsize=8)
     axes[2].grid(True, alpha=0.3)
 

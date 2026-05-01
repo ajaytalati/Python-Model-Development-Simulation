@@ -32,7 +32,12 @@ from jax import Array
 from typing import Dict, Tuple
 
 
-A_SCALE = 6.0      # fixed scale constant for tilde-Z (same as 20p)
+A_SCALE = 6.0      # legacy scale constant; superseded by Zt ∈ [0, 1] rescale.
+                   # Kept for backwards-compat for any consumer that imports
+                   # A_SCALE directly. The drift no longer multiplies sigma(u_Z)
+                   # by A_SCALE (Zt now saturates at 1, matching W and FSA-v2's
+                   # B); diffusion uses Jacobi sqrt(Z(1-Z)). See PARAM_SET_A
+                   # for the rescaled c_tilde / delta_c values.
 
 # Frozen morning-type circadian baseline (matches simulation.py).  The
 # chronotype phi is NOT a parameter; V_c (parameter) shifts the subject's
@@ -161,7 +166,7 @@ def drift(y: Array, t: Array, params: Array,
     mu_bifurc = mu_0 + mu_E * E
 
     dW  = (jax.nn.sigmoid(u_W) - W) / tau_W
-    dZt = (A_SCALE * jax.nn.sigmoid(u_Z) - Zt) / tau_Z
+    dZt = (jax.nn.sigmoid(u_Z) - Zt) / tau_Z   # Zt ∈ [0, 1]: saturates at 1
     da  = (W - a) / tau_a
     dT  = (mu_bifurc * T - eta * T ** 3) / tau_T
 
@@ -177,7 +182,13 @@ def drift(y: Array, t: Array, params: Array,
 # =========================================================================
 
 def diffusion(params: Array, pi: Dict[str, int]) -> Array:
-    """Diagonal diffusion coefficients sqrt(2 * T_i)  —  shape (7,)."""
+    """Diagonal diffusion coefficients sqrt(2 * T_i)  —  shape (7,).
+
+    These are the CONSTANT base coefficients sigma_i; the per-step
+    increment is sigma_i * g_i(y) * sqrt(dt) * xi_i, where g_i is the
+    state-dependent multiplier returned by ``noise_scale_jax`` (Jacobi
+    for W, Zt, a; identity for T).
+    """
     return jnp.array([
         jnp.sqrt(2.0 * params[pi['T_W']]),
         jnp.sqrt(2.0 * params[pi['T_Z']]),
@@ -186,6 +197,31 @@ def diffusion(params: Array, pi: Dict[str, int]) -> Array:
         0.0,  # C
         0.0,  # Vh
         0.0,  # Vn
+    ])
+
+
+def noise_scale_jax(y: Array, params: Array) -> Array:
+    """Diagonal Jacobi multipliers for the [0, 1]-bounded states.
+
+    For Z, a (and W) ∈ [0, 1] use Jacobi: g(x) = sqrt(x*(1-x)) so the
+    diffusion vanishes at the boundaries and the SDE stays in [0, 1]
+    intrinsically. For T the noise is state-INDEPENDENT (g = 1) — the
+    Stuart-Landau drift (mu T - eta T^3) vanishes at T=0, so additive
+    Gaussian kicks are needed to escape the absorbing boundary at T=0.
+    The deterministic states C, Vh, Vn are zeroed by ``diffusion`` so
+    their multipliers are irrelevant; we set them to 1 for symmetry.
+    """
+    del params
+    W, Zt, a = y[0], y[1], y[2]
+    sqrt = jnp.sqrt
+    return jnp.array([
+        sqrt(jnp.maximum(W * (1.0 - W), 0.0)),
+        sqrt(jnp.maximum(Zt * (1.0 - Zt), 0.0)),
+        sqrt(jnp.maximum(a * (1.0 - a), 0.0)),
+        1.0,    # T (state-INDEP additive noise)
+        1.0,    # C  (no noise via diffusion=0)
+        1.0,    # Vh (no noise via diffusion=0)
+        1.0,    # Vn (no noise via diffusion=0)
     ])
 
 
@@ -236,7 +272,7 @@ def imex_components(y: Array, t: Array, params: Array,
     mu_bifurc = mu_0 + mu_E * E
 
     fW  = jax.nn.sigmoid(u_W) / tau_W
-    fZt = A_SCALE * jax.nn.sigmoid(u_Z) / tau_Z
+    fZt = jax.nn.sigmoid(u_Z) / tau_Z   # Zt ∈ [0, 1]: saturates at 1
     fa  = W / tau_a
     fT  = mu_bifurc * T_amp / tau_T     # explicit forcing (signed)
 
@@ -261,7 +297,12 @@ def imex_step_deterministic(y: Array, t: Array, dt: Array, params: Array,
         jnp.sin(2.0 * jnp.pi * (t + dt) / 24.0 + PHI_MORNING_TYPE))
     y_next = y_next.at[5].set(y[5])  # Vh constant
     y_next = y_next.at[6].set(y[6])  # Vn constant
-    # Positivity clip on T
+    # Bound clips on the now-[0,1] states W, Zt, a (Jacobi diffusion vanishes
+    # at boundaries but Euler-Maruyama can drift slightly outside).
+    y_next = y_next.at[0].set(jnp.clip(y_next[0], 0.0, 1.0))
+    y_next = y_next.at[1].set(jnp.clip(y_next[1], 0.0, 1.0))
+    y_next = y_next.at[2].set(jnp.clip(y_next[2], 0.0, 1.0))
+    # Positivity clip on T (Stuart-Landau, no upper bound)
     y_next = y_next.at[3].set(jnp.maximum(y_next[3], 0.0))
     return y_next
 
@@ -288,7 +329,10 @@ def imex_step_stochastic(y: Array, t: Array, dt: Array, params: Array,
         jnp.sin(2.0 * jnp.pi * (t + dt) / 24.0 + PHI_MORNING_TYPE))
     y_next = y_next.at[5].set(y[5])
     y_next = y_next.at[6].set(y[6])
-    # Positivity clip on T (reflecting-boundary approximation)
+    # Bound clips on the [0, 1] states W, Zt, a + positivity clip on T.
+    y_next = y_next.at[0].set(jnp.clip(y_next[0], 0.0, 1.0))
+    y_next = y_next.at[1].set(jnp.clip(y_next[1], 0.0, 1.0))
+    y_next = y_next.at[2].set(jnp.clip(y_next[2], 0.0, 1.0))
     y_next = y_next.at[3].set(jnp.maximum(y_next[3], 0.0))
     return y_next, mu_prior, var_prior
 
