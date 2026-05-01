@@ -788,6 +788,37 @@ INIT_STATE_D = dict(INIT_STATE_A)
 # T_0 inherits 0.5 from INIT_STATE_A — start near healthy equilibrium, observe collapse
 
 
+# Parameter set E = over-trained-athlete diagnostic (V_h = 1, V_n = 1).
+# Both vitality AND chronic-load potentials simultaneously high — analogous
+# to the B-and-F-both-high regime in the FSA model. Vitality keeps the
+# entrainment amplitude bands wide (amp_W, amp_Z near saturation), but the
+# damper exp(-V_n / V_n_scale) = exp(-0.5) ≈ 0.61 attenuates E_dyn by 39%.
+# Reference state at a=0.5, T=0.85: B_W = 1 - 0.5 + 0.255 = 0.755,
+# B_Z = -1 + 4·0.5 = 1, A_W=5, A_Z=8 → amp_W ≈ 0.98, amp_Z ≈ 1.0,
+# damp ≈ 0.61, phase = 1 → E_dyn ≈ 0.60 → mu ≈ +0.10 → T* ≈ 0.45.
+# Expected behaviour: marginally super-critical — T sustains at a lower
+# equilibrium than Set A, vulnerable to perturbation (the over-trained
+# athlete's narrow margin against testosterone collapse).
+PARAM_SET_E = dict(PARAM_SET_A)
+INIT_STATE_E = dict(INIT_STATE_A)
+INIT_STATE_E['Vh'] = 1.0
+INIT_STATE_E['Vn'] = 1.0
+
+
+# Parameter set F = sedentary diagnostic (V_h = 0, V_n = 0).
+# Both potentials at zero — no vitality drive, no chronic load. Per
+# swat_entrainment_docs/03_corner_cases.md §3.1 / §3.5, V_h = 0 is a
+# HARD ZERO through the amplitude factors: A_W = A_Z = 0, so amp_W and
+# amp_Z evaluate sigma(B) − sigma(B) = 0 exactly. E_dyn = 0 → mu = -0.5 →
+# T* = 0. Expected behaviour: testosterone collapses to zero amplitude
+# regardless of how rested the patient is — the model says zero vitality
+# means no rhythm at all, even with no chronic stress.
+PARAM_SET_F = dict(PARAM_SET_A)
+INIT_STATE_F = dict(INIT_STATE_A)
+INIT_STATE_F['Vh'] = 0.0
+INIT_STATE_F['Vn'] = 0.0
+
+
 # =========================================================================
 # THE MODEL OBJECT
 # =========================================================================
@@ -832,8 +863,11 @@ SWAT_MODEL = SDEModel(
     verify_physics_fn=verify_physics,
 
     param_sets={'A': PARAM_SET_A, 'B': PARAM_SET_B,
-                'C': PARAM_SET_C, 'D': PARAM_SET_D},
+                'C': PARAM_SET_C, 'D': PARAM_SET_D,
+                'E': PARAM_SET_E, 'F': PARAM_SET_F},
     init_states={'A': INIT_STATE_A, 'B': INIT_STATE_B,
-                 'C': INIT_STATE_C, 'D': INIT_STATE_D},
-    exogenous_inputs={'A': {}, 'B': {}, 'C': {}, 'D': {}},
+                 'C': INIT_STATE_C, 'D': INIT_STATE_D,
+                 'E': INIT_STATE_E, 'F': INIT_STATE_F},
+    exogenous_inputs={'A': {}, 'B': {}, 'C': {}, 'D': {},
+                      'E': {}, 'F': {}},
 )
