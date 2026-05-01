@@ -313,14 +313,33 @@ def gen_hr(trajectory, t_grid, params, aux, prior_channels, seed):
 
 
 def gen_sleep(trajectory, t_grid, params, aux, prior_channels, seed):
-    """3-level ordinal sleep channel: sleep_level in {0=wake, 1=light+rem, 2=deep}.
+    """3-level ordinal sleep channel with sticky-HMM persistence.
 
-    Two thresholds c1 < c2 on the Zt state:
+    Per-bin marginal P(label | Zt) uses the same sigmoid model as
+    before:
         P(wake)      = 1 - sigma(Zt - c1)
         P(light+rem) = sigma(Zt - c1) - sigma(Zt - c2)
         P(deep)      = sigma(Zt - c2)
 
-    Parameterised as (c_tilde, delta_c > 0) with c1 = c_tilde, c2 = c_tilde + delta_c.
+    Parameterised as (c_tilde, delta_c > 0) with c1 = c_tilde,
+    c2 = c_tilde + delta_c.
+
+    Labels are NOT drawn independently. With persistence
+    P_stay = exp(-dt_h / tau_sleep_persist_h), the per-bin
+    transition kernel mixes the sticky and the marginal:
+        P_eff(new=k) = P_stay * 1[prev=k] + (1 - P_stay) * P_marg(k)
+
+    This gives multi-bin coherence: at dt_h = 5/60 and tau = 0.5h,
+    P_stay ≈ 0.85, mean run length ≈ 7 bins (~35 min). Healthy sleep
+    cycles last 30-90 min per stage, so the resulting trace shows
+    realistic block structure rather than the per-bin flicker that
+    independent sampling produces.
+
+    The estimator's sleep likelihood (`_ordinal_log_lik`) continues
+    to treat labels as conditionally independent given Zt. This
+    sim/est asymmetry is deliberate (analogous to the dropout
+    asymmetry already in the channel DAG) — the persistence is
+    primarily a generative-process correctness fix.
     """
     del aux, prior_channels
     rng = np.random.default_rng(seed)
@@ -334,11 +353,31 @@ def gen_sleep(trajectory, t_grid, params, aux, prior_channels, seed):
     s1 = _sigmoid(Zt - c1).astype(np.float64)   # P(sleep, any) = 1 - P(wake)
     s2 = _sigmoid(Zt - c2).astype(np.float64)   # P(deep)
 
-    # Cumulative probabilities: cum0 = P(level <= 0) = 1 - s1
-    #                          cum1 = P(level <= 1) = 1 - s2
-    draws = rng.random(size=T_len)
-    labels = np.where(draws < 1.0 - s1, 0,
-             np.where(draws < 1.0 - s2, 1, 2)).astype(np.int32)
+    # Per-bin marginal probabilities: shape (T_len, 3) over (wake, light, deep).
+    p_marg = np.stack([1.0 - s1, s1 - s2, s2], axis=1)
+    # Numerical clip: floating-point can give tiny negative entries
+    # at the threshold extremes (e.g. p_light = s1 - s2 ≈ -1e-17).
+    p_marg = np.clip(p_marg, 0.0, 1.0)
+    p_marg = p_marg / p_marg.sum(axis=1, keepdims=True)
+
+    # Persistence factor — geometric run-length with mean 1/(1-P_stay)
+    # bins. tau_sleep_persist_h falls back to 0.5 for older param sets
+    # that predate the sticky channel.
+    dt_h = float(t_grid[1] - t_grid[0])
+    tau_h = float(p.get('tau_sleep_persist_h', 0.5))
+    p_stay = np.exp(-dt_h / max(tau_h, 1e-6))
+
+    labels = np.empty(T_len, dtype=np.int32)
+    # Initialise from the marginal at t=0 (no previous label to stick to).
+    cum0 = np.cumsum(p_marg[0])
+    labels[0] = int(np.searchsorted(cum0, rng.random()))
+
+    for t in range(1, T_len):
+        sticky = np.zeros(3, dtype=np.float64)
+        sticky[labels[t - 1]] = 1.0
+        p_eff = p_stay * sticky + (1.0 - p_stay) * p_marg[t]
+        cum = np.cumsum(p_eff)
+        labels[t] = int(np.searchsorted(cum, rng.random()))
 
     return {
         't_idx': np.arange(T_len, dtype=np.int32),
@@ -527,6 +566,13 @@ PARAM_SET_A = {
     # (delta_c, beta_Z, tau_a) joint in downstream SMC² inference).
     'beta_Z':     4.0,
     'T_W':        0.01,
+    # T_Z left at 0.05 — the sticky-sleep transition kernel (added
+    # 2026-05-01, see `tau_sleep_persist_h` below + gen_sleep) is
+    # what actually fixes the per-bin label flicker. Lowering T_Z
+    # additionally was tried and had the side effect of damping Zt's
+    # amplitude (peak 5.5 → 4.5), starving the deep-sleep threshold
+    # c2 = c_tilde + delta_c = 4.0 of crossings. Keep T_Z at 0.05
+    # so deep_sleep_fraction stays near the realistic ~15% target.
     'T_Z':        0.05,
     'T_a':        0.01,
 
@@ -539,7 +585,11 @@ PARAM_SET_A = {
     'T_T':        0.0001,
 
     # ── New 3-level ordinal sleep channel ────────────────────
-    'delta_c':    1.5,    # c2 = c_tilde + delta_c; c1=3.0 -> c2=4.5 (deep threshold)
+    'delta_c':    1.5,    # c2 = c_tilde + delta_c; c1=2.5 -> c2=4.0 (deep threshold)
+    # Sleep-stage persistence: P_stay = exp(-dt_h / tau_sleep_persist_h).
+    # At dt_h=5/60 and tau=0.5h, P_stay≈0.85 → mean run length ~7 bins
+    # (~35 min). Healthy sleep cycles last 30-90 min per stage.
+    'tau_sleep_persist_h': 0.5,
 
     # ── New steps Poisson channel ────────────────────────────
     'lambda_base': 0.5,    # rare steps during sleep (~0.5 steps/h)
