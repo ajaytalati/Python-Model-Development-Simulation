@@ -646,7 +646,14 @@ PARAM_SET_A = {
     'lmbda':     32.0,
     'gamma_3':    8.0,
     'tau_W':      2.0,
-    'tau_Z':      2.0,
+    # tau_Z 2.0 → 0.25h (2026-05-01) — Zt now tracks sigma(u_Z) on a
+    # 15-min timescale instead of a 2h smoothing. Combined with the
+    # tau_a bump below, this gives Zt sharp wake↔sleep transitions
+    # and a near-flat plateau through the night (step-like
+    # flip-flop appearance per user's request). Does NOT affect the
+    # entrainment formula's sanity values (entrainment reads slow
+    # state values, not derivatives).
+    'tau_Z':      0.25,
     'V_c':        0.0,    # phase-shift (hours); 0 = morning type, healthy
     'HR_base':   50.0,
     'alpha_HR':  25.0,
@@ -656,11 +663,17 @@ PARAM_SET_A = {
     #   c_tilde  (wake → light): 2.5 / 6 ≈ 0.417
     #   delta_c  (light → deep): 1.5 / 6 = 0.25  → c2 = 0.667
     'c_tilde':    0.417,
-    # tau_a, beta_Z restored 2026-05-01 to the documented defaults
-    # (per swat_entrainment_docs/README.md "At a glance" table). My
-    # earlier "deeper sleep" tweak (tau_a=5, beta_Z=6) is reverted —
-    # the V_h-anabolic entrainment formula doesn't need them inflated.
-    'tau_a':      3.0,
+    # tau_a 3.0 → 10.0h (2026-05-01) — slow adenosine drain so `a`
+    # stays in [~0.4, ~0.85] instead of crashing to ~0 by end-of-night.
+    # That keeps u_Z = beta_Z·a positive throughout the night, which
+    # in turn keeps Zt saturated near 1 — yielding the step-like
+    # sleep-depth waveform the user wants. Trade-off: a's TIME-AVG
+    # rises slightly which shifts B_W in the entrainment formula by
+    # at most a few %; the 6 documented sanity values still pass to
+    # 1e-4 because they are evaluated at a FIXED a=0.5 reference.
+    'tau_a':      10.0,
+    # beta_Z stays at the documented 4.0 (changing it would break the
+    # pinned sanity values in test_entrainment_reference_values.py).
     'beta_Z':     4.0,
     'T_W':        0.01,
     # T_Z 0.05 unchanged in raw value — the rescale of Zt to [0, 1] makes
