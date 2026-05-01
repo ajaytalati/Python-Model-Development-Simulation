@@ -629,11 +629,21 @@ PARAM_SET_A = {
     'T_Z':        0.05,
     'T_a':        0.01,
 
-    # ── New Stuart-Landau testosterone block ───────────
-    'mu_0':      -0.5,
+    # ── Stuart-Landau testosterone block ───────────
+    # Tuning 2026-05-01 to make Set C visibly recover within the 14-day
+    # horizon and Set A robustly sit in the healthy basin:
+    #   mu_0 -0.5 → -0.3 — the structural tradeoff between mu_W_slow≈0
+    #     (which wants a≈1) and mu_Z_slow≈0 (which wants a≈0) caps the
+    #     time-averaged E_dyn at ~0.4 with V_h=1, V_n=0. With the old
+    #     mu_0=-0.5 (E_crit=0.5), avg mu was negative → T decayed.
+    #     With mu_0=-0.3 (E_crit=0.3), avg mu is positive → T grows.
+    #   tau_T 48h → 24h — halves the relaxation timescale so Set C
+    #     reaches the new healthy equilibrium T* = sqrt((mu_0+E_avg)/eta)
+    #     within the 14-day horizon instead of needing 30+ days.
+    'mu_0':      -0.3,
     'mu_E':       1.0,
     'eta':        0.5,
-    'tau_T':     48.0,
+    'tau_T':     24.0,
     'alpha_T':    0.3,
     'T_T':        0.0001,
 
